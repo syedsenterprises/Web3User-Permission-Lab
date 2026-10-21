@@ -230,9 +230,9 @@ describe("Web3User demo policy evaluator", () => {
       "9".repeat(79),
     ]) {
       expect(
-        run(policy, { ...action, amount }).decision,
+        run(policy, { ...action, amount }),
         `amount=${amount}`,
-      ).toBe("UNKNOWN");
+      ).toHaveProperty("decision", "UNKNOWN");
     }
   });
 
@@ -292,5 +292,65 @@ describe("Web3User demo policy evaluator", () => {
     expect(run(policy, null, context).decision).toBe("UNKNOWN");
     expect(run([], action, context).decision).toBe("UNKNOWN");
     expect(run(policy, "not an action", context).decision).toBe("UNKNOWN");
+  });
+
+  // Additional adversarial tests
+
+  it("allows case-insensitive target and recipient addresses", () => {
+    const mixedCaseTarget = `0x${TARGET.slice(2).toUpperCase()}`;
+    const mixedCaseRecipient = `0x${RECIPIENT.slice(2).toUpperCase()}`;
+
+    expect(
+      run(
+        {
+          ...policy,
+          allowedTarget: mixedCaseTarget,
+          allowedRecipient: mixedCaseRecipient,
+        },
+        {
+          ...action,
+          target: TARGET,
+          calldata: calldata(SELECTOR, 50n, RECIPIENT),
+        },
+      ).decision,
+    ).toBe("ALLOW");
+  });
+
+  it("allows the maximum uint256 amount when the policy permits it", () => {
+    const maxUint256 = (1n << 256n) - 1n;
+
+    expect(
+      run(
+        { ...policy, maxAmount: maxUint256.toString() },
+        {
+          ...action,
+          calldata: calldata(SELECTOR, maxUint256),
+          amount: maxUint256.toString(),
+        },
+      ).decision,
+    ).toBe("ALLOW");
+  });
+
+  it("returns UNKNOWN for a policy with an invalid version", () => {
+    expect(run({ ...policy, version: 2 }).decision).toBe("UNKNOWN");
+  });
+
+  it("returns UNKNOWN for a policy with a blank policy ID", () => {
+    expect(run({ ...policy, policyId: "   " }).decision).toBe("UNKNOWN");
+  });
+
+  it("returns UNKNOWN for non-hex calldata", () => {
+    expect(
+      run(policy, { ...action, calldata: `0x${"z".repeat(136)}` }).decision,
+    ).toBe("UNKNOWN");
+  });
+
+  it("returns UNKNOWN for a calldata string longer than the permitted limit", () => {
+    expect(
+      run(policy, {
+        ...action,
+        calldata: `0x${"a".repeat(8194)}`,
+      }).decision,
+    ).toBe("UNKNOWN");
   });
 });

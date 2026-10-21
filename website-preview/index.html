@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Web3User Permission Lab is a development-stage prototype exploring explicit, testable policy checks for Web3 transaction authorization.">
+<meta name="theme-color" content="#101a2c">
+<title>Web3User Permission Lab — Development Preview</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1220;--panel:#111d30;--line:#263752;--text:#eef4ff;--muted:#a7b6cc;--cyan:#71e2d0;--blue:#89b4ff;--gold:#ffd48a}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#182a45 0,transparent 45%),var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+a{color:var(--cyan)}.wrap{width:min(1100px,calc(100% - 36px));margin:auto}.nav{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 0;border-bottom:1px solid var(--line)}.brand{font-weight:750;letter-spacing:.2px}.pill{font-size:.78rem;color:var(--gold);border:1px solid #735a2b;background:#332a19;padding:5px 10px;border-radius:999px}
+.hero{padding:76px 0 52px;max-width:850px}.eyebrow{color:var(--cyan);font-weight:700;text-transform:uppercase;letter-spacing:2px;font-size:.78rem}.hero h1{font-size:clamp(2.5rem,6vw,4.7rem);line-height:1.06;letter-spacing:-.04em;margin:15px 0 22px}.hero p{color:var(--muted);font-size:1.12rem;max-width:760px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}.btn{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:11px 16px;font-weight:700}.btn.primary{background:var(--cyan);color:#07151b;border-color:var(--cyan)}.btn:hover{filter:brightness(1.08)}
+.notice{border:1px solid #735a2b;background:#211e19;border-radius:14px;padding:18px 20px;color:#ffe5b4;margin:8px 0 42px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px;margin:22px 0 54px}.card{background:linear-gradient(145deg,#132139,#101a2c);border:1px solid var(--line);border-radius:16px;padding:22px}.card h3{margin:0 0 8px}.card p{margin:0;color:var(--muted)}section{padding:20px 0}h2{font-size:1.8rem;letter-spacing:-.02em}.muted{color:var(--muted)}.status{display:inline-block;font-size:.74rem;font-weight:750;padding:3px 8px;border-radius:6px;background:#123c38;color:#9bf0df}.planned{background:#2b2a38;color:#c9c6ff}.roadmap{display:grid;gap:10px}.milestone{display:grid;grid-template-columns:70px 1fr auto;gap:14px;align-items:start;padding:15px 16px;border:1px solid var(--line);border-radius:12px;background:#101a2a}.milestone p{margin:4px 0 0;color:var(--muted)}.id{color:var(--blue);font-weight:800}footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
+@media(max-width:600px){.hero{padding-top:48px}.milestone{grid-template-columns:50px 1fr}.milestone .status{grid-column:2;justify-self:start}.nav{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body>
+<header class="wrap nav"><div class="brand">◈ Web3User Permission Lab</div><span class="pill">DEVELOPMENT PREVIEW · v0.2.0</span></header>
+<main class="wrap">
+<section class="hero">
+<div class="eyebrow">Explicit permissions for Web3 actions</div>
+<h1>Make transaction rules easier to inspect, test, and reason about.</h1>
+<p>Web3User Permission Lab is an early-stage prototype exploring how proposed blockchain actions can be checked against clear rules before authorization. The current code supports a narrow ERC-20 transfer policy evaluator—not a wallet or transaction enforcement product.</p>
+<div class="actions">
+<a class="btn primary" href="assets/web3user-whitepaper-v0.2.0.pdf">Read the white paper (PDF)</a>
+<a class="btn" href="assets/web3user-project-mindmap-v0.2.0.pdf">Open project mindmap</a>
+</div>
+</section>
+<div class="notice"><strong>Development-stage notice:</strong> This project is experimental and has not been independently security-audited. It does not sign, submit, block, or enforce transactions. Do not use it to protect real funds or authorize production transactions.</div>
+<section>
+<h2>What exists today</h2>
+<div class="grid">
+<article class="card"><h3>Policy evaluator</h3><p>A TypeScript prototype checks one ERC-20 transfer call format and returns ALLOW, DENY, or UNKNOWN.</p></article>
+<article class="card"><h3>Input validation</h3><p>It decodes the recipient and amount from calldata and checks policy rules, validity windows, and revocation.</p></article>
+<article class="card"><h3>Test baseline</h3><p>The recorded development baseline has 34 passing tests and a successful TypeScript check.</p></article>
+</div>
+</section>
+<section>
+<h2>Roadmap</h2>
+<div class="roadmap">
+<div class="milestone"><div class="id">M0–M3</div><div><strong>Foundation, evaluator, tests, documentation</strong><p>Completed according to the current project record.</p></div><span class="status">COMPLETE</span></div>
+<div class="milestone"><div class="id">M4</div><div><strong>Exact transaction binding</strong><p>Ensure a decision cannot be reused after security-relevant transaction fields change.</p></div><span class="status planned">PLANNED</span></div>
+<div class="milestone"><div class="id">M5–M6</div><div><strong>Fail-closed enforcement and chain context</strong><p>Define the integration boundary and the transaction fields required for authorization.</p></div><span class="status planned">PLANNED</span></div>
+<div class="milestone"><div class="id">M7–M9</div><div><strong>Budgets, replay controls, adversarial tests, independent review</strong><p>Build and review the controls required before considering production use.</p></div><span class="status planned">PLANNED</span></div>
+</div>
+</section>
+<section>
+<h2>Design principles</h2>
+<div class="grid">
+<article class="card"><h3>Fail closed</h3><p>DENY and UNKNOWN must never be treated as approval by a future integration.</p></article>
+<article class="card"><h3>Least privilege</h3><p>Permissions should be limited by target, recipient, amount, time, and scope.</p></article>
+<article class="card"><h3>Evidence over claims</h3><p>Distinguish implemented features from planned work; tests are not a security audit.</p></article>
+</div>
+</section>
+<section>
+<h2>Technical snapshot</h2>
+<p class="muted">Language: TypeScript · Runtime/tooling: Node.js and npm · Tests: Vitest · Type checking: TypeScript compiler · Version control: Git and GitHub.</p>
+<p class="muted">Current supported selector: <code>0xa9059cbb</code> — ERC-20 <code>transfer(address,uint256)</code>. Cumulative budgets, replay protection, chain-aware transaction binding, and enforcement are not implemented.</p>
+</section>
+<section>
+<h2>Project documents</h2>
+<ul>
+<li><a href="assets/web3user-whitepaper-v0.2.0.pdf">Technical white paper — v0.2.0 (PDF)</a></li>
+<li><a href="assets/web3user-project-mindmap-v0.2.0.pdf">Detailed project mindmap (PDF)</a></li>
+</ul>
+</section>
+</main>
+<footer><div class="wrap">Web3User Permission Lab · Development draft v0.2.0 · This site is informational and does not provide financial, legal, or security guarantees.</div></footer>
+</body>
+</html>
