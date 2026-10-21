@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { consumeTransactionAuthorization } from "../src/authorization-lifecycle.js";
 import {
   prepareTransactionAuthorization,
   revalidateTransactionAuthorization,
@@ -207,6 +208,125 @@ describe("policy-transaction integration", () => {
     );
 
     expect(result.decision).toBe("UNKNOWN");
+  });
+
+
+  it("consumes an approved envelope only once", () => {
+    const prepared = prepareTransactionAuthorization(policy, request, context);
+    expect(prepared.decision).toBe("ALLOW");
+    if (prepared.decision !== "ALLOW") return;
+
+    const first = consumeTransactionAuthorization(
+      policy, prepared.envelope, request, context,
+    );
+    expect(first.decision).toBe("ALLOW");
+
+    const second = consumeTransactionAuthorization(
+      policy, prepared.envelope, request, context,
+    );
+    expect(second.decision).toBe("DENY");
+  });
+
+  it("does not consume an envelope when revalidation fails", () => {
+    const prepared = prepareTransactionAuthorization(policy, request, context);
+    expect(prepared.decision).toBe("ALLOW");
+    if (prepared.decision !== "ALLOW") return;
+
+    const denied = consumeTransactionAuthorization(
+      { ...policy, revoked: true },
+      prepared.envelope,
+      request,
+      context,
+    );
+    expect(denied.decision).toBe("DENY");
+
+    const valid = consumeTransactionAuthorization(
+      policy,
+      prepared.envelope,
+      request,
+      context,
+    );
+    expect(valid.decision).toBe("ALLOW");
+  });
+
+  it("does not consume an envelope when the candidate was changed", () => {
+    const prepared = prepareTransactionAuthorization(policy, request, context);
+    expect(prepared.decision).toBe("ALLOW");
+    if (prepared.decision !== "ALLOW") return;
+
+    const changed = consumeTransactionAuthorization(
+      policy,
+      prepared.envelope,
+      { ...request, value: "1" },
+      context,
+    );
+    expect(changed.decision).toBe("DENY");
+
+    const unchanged = consumeTransactionAuthorization(
+      policy,
+      prepared.envelope,
+      request,
+      context,
+    );
+    expect(unchanged.decision).toBe("ALLOW");
+  });
+
+  it("allows a separate envelope to be consumed independently", () => {
+    const firstPrepared = prepareTransactionAuthorization(
+      policy, request, context,
+    );
+    const secondPrepared = prepareTransactionAuthorization(
+      policy, request, context,
+    );
+
+    expect(firstPrepared.decision).toBe("ALLOW");
+    expect(secondPrepared.decision).toBe("ALLOW");
+    if (
+      firstPrepared.decision !== "ALLOW" ||
+      secondPrepared.decision !== "ALLOW"
+    ) return;
+
+    expect(firstPrepared.envelope).not.toBe(secondPrepared.envelope);
+
+    expect(
+      consumeTransactionAuthorization(
+        policy, firstPrepared.envelope, request, context,
+      ).decision,
+    ).toBe("ALLOW");
+
+    expect(
+      consumeTransactionAuthorization(
+        policy, secondPrepared.envelope, request, context,
+      ).decision,
+    ).toBe("ALLOW");
+  });
+
+  it("keeps envelope matching reusable after consumption", async () => {
+    const { matchesTransactionEnvelope } =
+      await import("../src/transaction-envelope.js");
+
+    const prepared = prepareTransactionAuthorization(
+      policy, request, context,
+    );
+
+    expect(prepared.decision).toBe("ALLOW");
+    if (prepared.decision !== "ALLOW") return;
+
+    expect(
+      consumeTransactionAuthorization(
+        policy, prepared.envelope, request, context,
+      ).decision,
+    ).toBe("ALLOW");
+
+    expect(
+      matchesTransactionEnvelope(prepared.envelope, request),
+    ).toBe(true);
+
+    expect(
+      consumeTransactionAuthorization(
+        policy, prepared.envelope, request, context,
+      ).decision,
+    ).toBe("DENY");
   });
 
   it("denies revalidation with a malformed candidate", () => {
