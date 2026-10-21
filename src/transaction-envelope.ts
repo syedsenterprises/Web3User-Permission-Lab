@@ -1,6 +1,6 @@
 
 /**
- * Web3User Permission Lab — transaction authorization envelope.
+ * Web3User Permission Lab â€” transaction authorization envelope.
  *
  * SECURITY CONTRACT:
  * - Envelopes are recognized only if created by this module instance.
@@ -145,7 +145,7 @@ export function createTransactionEnvelope(
 export function matchesTransactionEnvelope(
   envelope: unknown,
   candidate: unknown,
-): boolean {
+): envelope is TransactionEnvelope {
   if (
     !isRecord(envelope) ||
     !issuedEnvelopes.has(envelope) ||
