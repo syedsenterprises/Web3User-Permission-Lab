@@ -1,3 +1,4 @@
+﻿import type { AuthorizationIdStore } from "./authorization-store.js";
 import {
   revalidateTransactionAuthorization,
   type TransactionAuthorization,
@@ -113,4 +114,46 @@ export function consumeTransactionAuthorizationById(
     contextInput,
     authorizationIdInput.trim(),
   );
+}
+
+/**
+ * Revalidate an authorization and reserve its ID in persistent storage.
+ * The store must enforce atomic uniqueness for authorization IDs.
+ */
+export function consumeTransactionAuthorizationWithStore(
+  store: AuthorizationIdStore,
+  authorizationIdInput: unknown,
+  policyInput: unknown,
+  envelopeInput: unknown,
+  candidateInput: unknown,
+  contextInput: unknown,
+): TransactionAuthorization {
+  if (
+    typeof authorizationIdInput !== "string" ||
+    authorizationIdInput.trim().length === 0
+  ) {
+    return deny("A non-empty authorization ID is required.");
+  }
+
+  if (isObject(envelopeInput) && consumedEnvelopes.has(envelopeInput)) {
+    return deny("Transaction authorization has already been consumed.");
+  }
+
+  const result = revalidateTransactionAuthorization(
+    policyInput,
+    envelopeInput,
+    candidateInput,
+    contextInput,
+  );
+
+  if (result.decision !== "ALLOW") {
+    return result;
+  }
+
+  if (!store.reserve(authorizationIdInput.trim())) {
+    return deny("Transaction authorization ID has already been consumed.");
+  }
+
+  consumedEnvelopes.add(result.envelope);
+  return result;
 }
