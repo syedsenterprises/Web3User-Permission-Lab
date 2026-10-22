@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { consumeTransactionAuthorization } from "../src/authorization-lifecycle.js";
+import {
+  consumeTransactionAuthorization,
+  consumeTransactionAuthorizationById,
+} from "../src/authorization-lifecycle.js";
 import {
   prepareTransactionAuthorization,
   revalidateTransactionAuthorization,
@@ -210,7 +213,6 @@ describe("policy-transaction integration", () => {
     expect(result.decision).toBe("UNKNOWN");
   });
 
-
   it("consumes an approved envelope only once", () => {
     const prepared = prepareTransactionAuthorization(policy, request, context);
     expect(prepared.decision).toBe("ALLOW");
@@ -329,6 +331,119 @@ describe("policy-transaction integration", () => {
     ).toBe("DENY");
   });
 
+  it("denies replay of an authorization ID through a new envelope", () => {
+    const first = prepareTransactionAuthorization(policy, request, context);
+    const second = prepareTransactionAuthorization(policy, request, context);
+
+    expect(first.decision).toBe("ALLOW");
+    expect(second.decision).toBe("ALLOW");
+    if (first.decision !== "ALLOW" || second.decision !== "ALLOW") return;
+
+    expect(
+      consumeTransactionAuthorizationById(
+        "auth-replay-test-001", policy, first.envelope, request, context,
+      ).decision,
+    ).toBe("ALLOW");
+
+    expect(
+      consumeTransactionAuthorizationById(
+        "auth-replay-test-001", policy, second.envelope, request, context,
+      ).decision,
+    ).toBe("DENY");
+  });
+
+  it("allows a distinct authorization ID for a separate envelope", () => {
+    const first = prepareTransactionAuthorization(policy, request, context);
+    const second = prepareTransactionAuthorization(policy, request, context);
+
+    expect(first.decision).toBe("ALLOW");
+    expect(second.decision).toBe("ALLOW");
+    if (first.decision !== "ALLOW" || second.decision !== "ALLOW") return;
+
+    expect(
+      consumeTransactionAuthorizationById(
+        "auth-independent-test-001", policy, first.envelope, request, context,
+      ).decision,
+    ).toBe("ALLOW");
+
+    expect(
+      consumeTransactionAuthorizationById(
+        "auth-independent-test-002", policy, second.envelope, request, context,
+      ).decision,
+    ).toBe("ALLOW");
+  });
+
+  it("does not reserve an authorization ID when validation fails", () => {
+    const prepared = prepareTransactionAuthorization(policy, request, context);
+    expect(prepared.decision).toBe("ALLOW");
+    if (prepared.decision !== "ALLOW") return;
+
+    expect(
+      consumeTransactionAuthorizationById(
+        "auth-retry-test-001",
+        { ...policy, revoked: true },
+        prepared.envelope,
+        request,
+        context,
+      ).decision,
+    ).toBe("DENY");
+
+    expect(
+      consumeTransactionAuthorizationById(
+        "auth-retry-test-001", policy, prepared.envelope, request, context,
+      ).decision,
+    ).toBe("ALLOW");
+  });
+
+  it("rejects an empty authorization ID", () => {
+    const prepared = prepareTransactionAuthorization(policy, request, context);
+    expect(prepared.decision).toBe("ALLOW");
+    if (prepared.decision !== "ALLOW") return;
+
+    expect(
+      consumeTransactionAuthorizationById(
+        " ", policy, prepared.envelope, request, context,
+      ).decision,
+    ).toBe("DENY");
+  });
+  it("denies ID replay after the original API consumes another envelope", () => {
+    const first = prepareTransactionAuthorization(policy, request, context);
+    const second = prepareTransactionAuthorization(policy, request, context);
+
+    expect(first.decision).toBe("ALLOW");
+    expect(second.decision).toBe("ALLOW");
+    if (first.decision !== "ALLOW" || second.decision !== "ALLOW") return;
+
+    expect(
+      consumeTransactionAuthorization(
+        policy, first.envelope, request, context,
+      ).decision,
+    ).toBe("ALLOW");
+
+    expect(
+      consumeTransactionAuthorizationById(
+        "auth-cross-api-test-001",
+        policy,
+        second.envelope,
+        request,
+        context,
+      ).decision,
+    ).toBe("ALLOW");
+
+    const third = prepareTransactionAuthorization(policy, request, context);
+    expect(third.decision).toBe("ALLOW");
+    if (third.decision !== "ALLOW") return;
+
+    expect(
+      consumeTransactionAuthorizationById(
+        "auth-cross-api-test-001",
+        policy,
+        third.envelope,
+        request,
+        context,
+      ).decision,
+    ).toBe("DENY");
+  });
   it("denies revalidation with a malformed candidate", () => {
     const prepared = prepareTransactionAuthorization(
       policy,
