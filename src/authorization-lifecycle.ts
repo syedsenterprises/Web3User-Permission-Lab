@@ -4,6 +4,15 @@ import {
   type TransactionAuthorization,
 } from "./policy-transaction.js";
 import type { TransactionEnvelope } from "./transaction-envelope.js";
+import type { BoundAuthorizationIdStore } from "./authorization-store.js";
+import {
+  BOUND_AUTHORIZATION_ARTIFACT_VERSION,
+  createAuthorizationBindingDigest,
+  isBoundAuthorizationArtifact,
+  type BoundAuthorizationArtifact,
+} from "./authorization-binding.js";
+import { prepareTransactionAuthorization } from "./policy-transaction.js";
+import { normalizeDemoPolicy, type Evaluation } from "./policy.js";
 
 const consumedEnvelopes = new WeakSet<object>();
 const consumedAuthorizationIds = new Set<string>();
@@ -12,7 +21,7 @@ function isObject(value: unknown): value is object {
   return typeof value === "object" && value !== null;
 }
 
-function deny(reason: string): TransactionAuthorization {
+function deny(reason: string): Evaluation & { decision: "DENY" } {
   return {
     decision: "DENY",
     reasons: [reason],
@@ -27,6 +36,27 @@ function normalizeAuthorizationId(input: unknown): string | null {
   if (typeof input !== "string") return null;
   const normalized = input.trim();
   return normalized.length > 0 ? normalized : null;
+}
+
+export type BoundTransactionAuthorization =
+  | (Evaluation & {
+      decision: "ALLOW";
+      envelope: TransactionEnvelope;
+      artifact: BoundAuthorizationArtifact;
+    })
+  | (Evaluation & {
+      decision: "DENY" | "UNKNOWN";
+    });
+
+function parseArtifact(input: unknown): BoundAuthorizationArtifact | null {
+  if (!isBoundAuthorizationArtifact(input)) return null;
+
+  const authorizationId = normalizeAuthorizationId(input.authorizationId);
+  if (authorizationId === null || authorizationId !== input.authorizationId) {
+    return null;
+  }
+
+  return input;
 }
 
 /**
@@ -171,5 +201,111 @@ export function consumeTransactionAuthorizationWithStore(
   }
 
   consumedEnvelopes.add(result.envelope);
+  return result;
+}
+
+/**
+ * Issue a serializable, versioned artifact whose ID is persisted together
+ * with a digest of the canonical policy and request. The caller must be a
+ * trusted issuer; the digest itself does not prove issuer identity.
+ */
+export function issueBoundTransactionAuthorizationWithStore(
+  store: BoundAuthorizationIdStore,
+  authorizationIdInput: unknown,
+  policyInput: unknown,
+  requestInput: unknown,
+  contextInput: unknown,
+): BoundTransactionAuthorization {
+  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
+  if (authorizationId === null) {
+    return deny("A non-empty authorization ID is required.");
+  }
+
+  const prepared = prepareTransactionAuthorization(
+    policyInput,
+    requestInput,
+    contextInput,
+  );
+
+  if (prepared.decision !== "ALLOW") {
+    return prepared;
+  }
+
+  const policy = normalizeDemoPolicy(policyInput);
+  if (policy === null) {
+    return {
+      decision: "UNKNOWN",
+      reasons: ["Policy is malformed or unsupported."],
+    };
+  }
+
+  const bindingDigest = createAuthorizationBindingDigest(
+    policy,
+    prepared.envelope.request,
+  );
+
+  if (!store.issueBound(authorizationId, bindingDigest)) {
+    return deny("Transaction authorization ID has already been issued or consumed.");
+  }
+
+  return {
+    ...prepared,
+    artifact: Object.freeze({
+      version: BOUND_AUTHORIZATION_ARTIFACT_VERSION,
+      authorizationId,
+      bindingDigest,
+    }),
+  };
+}
+
+/**
+ * Revalidate an artifact's policy and envelope binding before atomically
+ * consuming the matching issued ID. This never falls back to in-memory state.
+ */
+export function consumeBoundTransactionAuthorizationWithStore(
+  store: BoundAuthorizationIdStore,
+  artifactInput: unknown,
+  policyInput: unknown,
+  envelopeInput: unknown,
+  candidateInput: unknown,
+  contextInput: unknown,
+): TransactionAuthorization {
+  const artifact = parseArtifact(artifactInput);
+  if (artifact === null) {
+    return deny("Bound transaction authorization artifact is invalid.");
+  }
+
+  const result = revalidateTransactionAuthorization(
+    policyInput,
+    envelopeInput,
+    candidateInput,
+    contextInput,
+  );
+
+  if (result.decision !== "ALLOW") {
+    return result;
+  }
+
+  const policy = normalizeDemoPolicy(policyInput);
+  if (policy === null) {
+    return {
+      decision: "UNKNOWN",
+      reasons: ["Policy is malformed or unsupported."],
+    };
+  }
+
+  const bindingDigest = createAuthorizationBindingDigest(
+    policy,
+    result.envelope.request,
+  );
+
+  if (bindingDigest !== artifact.bindingDigest) {
+    return deny("Transaction does not match the bound authorization artifact.");
+  }
+
+  if (!store.consumeBound(artifact.authorizationId, bindingDigest)) {
+    return deny("Bound transaction authorization is unknown, consumed, or mismatched.");
+  }
+
   return result;
 }

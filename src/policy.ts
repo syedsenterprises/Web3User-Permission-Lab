@@ -96,7 +96,12 @@ function unknownResult(reason: string): Evaluation {
   return { decision: "UNKNOWN", reasons: [reason] };
 }
 
-function parsePolicy(input: unknown): DemoPolicy | null {
+/**
+ * Validate a policy and return its canonical representation for comparison
+ * and authorization binding. This does not establish that the policy came
+ * from a trusted issuer.
+ */
+export function normalizeDemoPolicy(input: unknown): DemoPolicy | null {
   if (!isRecord(input)) return null;
 
   const {
@@ -135,9 +140,9 @@ function parsePolicy(input: unknown): DemoPolicy | null {
   return {
     version: 1,
     policyId,
-    allowedTarget,
-    allowedRecipient,
-    allowedSelector,
+    allowedTarget: allowedTarget.toLowerCase(),
+    allowedRecipient: allowedRecipient.toLowerCase(),
+    allowedSelector: allowedSelector.toLowerCase(),
     maxAmount,
     validFrom,
     expiresAt,
@@ -209,7 +214,7 @@ export function evaluate(
   actionInput: unknown,
   contextInput: unknown,
 ): Evaluation {
-  const policy = parsePolicy(policyInput);
+  const policy = normalizeDemoPolicy(policyInput);
 
   if (!policy) {
     return unknownResult("Policy is malformed or unsupported.");

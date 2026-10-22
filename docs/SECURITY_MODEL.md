@@ -127,7 +127,124 @@ Replay protection is only one part of transaction enforcement. This library
 does not sign or submit transactions, connect to a wallet, or enforce an
 on-chain result. Cumulative or time-window budgets are not implemented.
 
-## 8. Testing and Limitations
+## 8. Bound Authorization Artifacts and Additive State Model
+
+Milestone 5B introduces versioned, serializable authorization artifacts paired
+with an additive two-phase (`issued` → `consumed`) state model in SQLite.
+
+### 8.1 Artifact Structure and Deterministic Canonical Binding
+
+A bound authorization artifact (`BoundAuthorizationArtifact`) is a versioned,
+serializable object containing:
+- `version`: integer schema version (currently `1`).
+- `authorizationId`: unique, non-empty, trimmed identifier.
+- `bindingDigest`: SHA-256 digest formatted as `sha256:<64 hex characters>`.
+
+The binding digest is computed by `createAuthorizationBindingDigest` over a
+deterministic, canonical string encoding (`web3user-bound-authorization-v1\n`).
+Each field is serialized with a length prefix (`name:length:value\n`) to eliminate
+delimiter collision. The bound fields include:
+- Normalized request parameters: `chainId`, `sender` (lowercase), `target` (lowercase),
+  `calldata` (lowercase), and native `value`.
+- Normalized policy constraints: `version`, `policyId`, `allowedTarget` (lowercase),
+  `allowedRecipient` (lowercase), `allowedSelector` (lowercase), `maxAmount`,
+  `validFrom`, `expiresAt`, and `revoked`.
+
+### 8.2 Additive SQLite Migration and Two-Phase State Model
+
+The underlying table `consumed_authorization_ids` is extended additively:
+- `authorization_id TEXT PRIMARY KEY`
+- `binding_digest TEXT`
+- `state TEXT NOT NULL DEFAULT 'consumed' CHECK (state IN ('issued', 'consumed'))`
+- `consumed_at TEXT` (nullable; set only upon consumption)
+
+Existing databases containing legacy consumed records are upgraded additively.
+Legacy records retain `state = 'consumed'`, their original `consumed_at` timestamp, and `binding_digest = NULL`.
+
+The store supports two lifecycle models:
+1. **Legacy One-Phase Reservation**: `reserve(id)` directly inserts the ID with
+   `state = 'consumed'` and `consumed_at = CURRENT_TIMESTAMP`. If the ID already exists in any state, reservation fails.
+2. **Bound Two-Phase Issuance and Consumption**:
+   - `issueBound(id, digest)`: Atomically inserts a record in `state = 'issued'`
+     with the expected `binding_digest` and `consumed_at = NULL`. If the ID already exists in either `issued`
+     or `consumed` state, issuance fails closed with `DENY`.
+   - `consumeBound(id, digest)`: Atomically transitions exactly one record from
+     `state = 'issued'` to `state = 'consumed'`, setting `consumed_at = CURRENT_TIMESTAMP`,
+     matching both the `authorization_id` and `binding_digest`. If the record is missing, already consumed, or has a
+     mismatched digest, consumption fails closed with `DENY`.
+
+### 8.3 Issuer Authentication Limitation
+
+The binding digest establishes strict cryptographic integrity between the normalized
+transaction request and the evaluated policy snapshot. However:
+- **The digest does not authenticate the issuer.** The SHA-256 digest is an unkeyed
+  cryptographic hash, not an HMAC or digital signature.
+- Any caller with access to a policy and transaction request can compute the
+  canonical binding digest.
+- `issueBoundTransactionAuthorizationWithStore` relies entirely on the caller being
+  an authorized, trusted issuer. An untrusted party must not be permitted to call
+  the issuance boundary.
+
+### 8.4 Bearer Capability and Interception Risks
+
+A bound authorization artifact functions as a **bearer capability**:
+- Possession of the serialized artifact (`authorizationId` and `bindingDigest`)
+  along with the corresponding transaction request grants the bearer the ability to
+  consume the authorization.
+- If an issued artifact is intercepted or leaked before consumption, an adversary
+  could submit the artifact and transaction to `consumeBoundTransactionAuthorizationWithStore`
+  ahead of the intended caller. While the adversary cannot alter transaction
+  parameters (such as redirecting funds to an unapproved recipient or changing the
+  amount without invalidating the binding digest), they could consume the single-use
+  authorization prematurely, causing a denial of service for the legitimate caller.
+- Callers must safeguard artifacts in transit and at rest, and production systems
+  should bind consumption to authenticated caller sessions where required.
+
+### 8.5 Revalidation and Pre-Consumption Protection
+
+When `consumeBoundTransactionAuthorizationWithStore` is called:
+1. The artifact format and normalized ID are validated.
+2. The current policy snapshot, trusted time (`EvaluationContext.nowSeconds`), and
+   candidate transaction are fully revalidated against the envelope.
+3. The canonical binding digest is recomputed using current normalized policy and
+   request fields.
+4. If the recomputed digest differs from the artifact's `bindingDigest`, the request
+   is denied immediately without touching storage.
+5. The storage transition (`consumeBound`) is executed only after all checks pass.
+   Storage errors propagate and never result in `ALLOW` or fallback to in-memory state.
+6. A failed consumption attempt due to parameter mismatch, policy violation, or
+   expiry does not consume the issued record in SQLite, leaving the original
+   authorization available for a legitimate matching transaction.
+
+### 8.6 Policy Revocation Followed by Restoration
+
+We explicitly investigated the behavior and security implications when a policy is
+temporarily revoked and subsequently restored:
+
+1. **Behavior During Revocation**: If an artifact is issued under policy $P$ (`revoked: false`),
+   and $P$ is later marked `revoked: true`, consumption attempts fail during revalidation
+   with `DENY` ("Policy has been revoked.").
+2. **State Retention**: Because the revalidation fails before storage consumption,
+   the record in SQLite remains in the `state = 'issued'` state.
+3. **Behavior Upon Restoration**: If policy $P$ is subsequently restored (`revoked: false`),
+   a subsequent consumption attempt with valid trusted time and matching parameters will
+   succeed: revalidation passes, the recomputed digest matches the issued digest
+   (which bound `policy.revoked: false`), and SQLite atomically transitions the state
+   from `issued` to `consumed`.
+
+**Security Implication**: Policy revocation operates as a *temporary, conditional block*
+on consumption rather than an *irreversible cancellation or tombstone* of pending
+issued authorizations. If an organization's security posture requires that revoking a
+policy permanently and irrevocably invalidates all unconsumed authorizations previously
+issued under that policy:
+- Do not merely restore the existing policy.
+- Instead, **rotate the `policyId`** or advance the policy version when re-enabling
+  permissions. Because `policyId` is bound into the canonical digest, rotating it
+  permanently invalidates all previously issued artifacts under the old `policyId`.
+- Alternatively, explicitly mark all outstanding authorization IDs as consumed in
+  the persistent store before restoring permissions.
+
+## 9. Testing and Limitations
 
 The automated tests cover policy validation, time boundaries, amount
 limits, recipient restrictions, malformed inputs, calldata mismatch, and

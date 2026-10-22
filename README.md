@@ -18,9 +18,13 @@ npm run demo:persistent-replay
 
 ## Persistent replay demonstration
 
-The demo uses a fixed local policy, transfer request, trusted demonstration time, and authorization ID. It runs the existing authorization checks and reserves the ID in SQLite. The first run prints `Decision: ALLOW`; subsequent runs against the same database print `Decision: DENY` with the duplicate-ID reason. A denial is the expected successful replay-protection result.
+The demo demonstrates persistent replay protection using bound authorization artifacts and an additive two-phase (`issued` → `consumed`) state model in SQLite. It uses a fixed local policy, transfer request, trusted demonstration time, and authorization ID (`bound-replay-demo-authorization-001`).
 
-The dedicated demo database is stored at `.demo-data/authorization-replay.sqlite` in the repository. It is separate from application data and is ignored by Git. To reset the demonstration, stop the process and remove the `.demo-data` directory, then run the command again. The demo never removes or resets this database automatically.
+- **First run**: Issues the bound authorization artifact (inserting a record in state `issued` with canonical SHA-256 binding digest), then revalidates and atomically consumes the artifact (transitioning state to `consumed`). Prints `Decision: ALLOW`.
+- **Subsequent runs**: Reopens the persistent database, reconstructs the bound artifact, and attempts to consume it again. Because the database record is already in state `consumed`, the consumption fails closed and prints `Decision: DENY` with reason `Bound transaction authorization is unknown, consumed, or mismatched.`. A denial is the expected successful replay-protection result.
+- **Verification mode**: Run `npm run demo:persistent-replay -- --verify` to run an automated, end-to-end verification against an isolated temporary database, demonstrating both fresh issuance/consumption and replay rejection across database reopen.
+
+The demo database is stored at `.demo-data/bound-authorization-replay.sqlite` in the repository. It is separate from application data and is ignored by Git. The legacy demo database (`.demo-data/authorization-replay.sqlite`) is preserved. The demo never removes or resets databases automatically.
 
 This is a local authorization demonstration only. An `ALLOW` result does not mean a transaction was signed, submitted, or executed. The demo does not connect to a wallet, interact with a blockchain, move funds, or provide a production deployment.
 
