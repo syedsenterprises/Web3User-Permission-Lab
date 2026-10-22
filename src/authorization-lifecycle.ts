@@ -1,4 +1,5 @@
-﻿import type { AuthorizationIdStore } from "./authorization-store.js";
+import type { KeyObject } from "node:crypto";
+import type { AuthorizationIdStore } from "./authorization-store.js";
 import {
   revalidateTransactionAuthorization,
   type TransactionAuthorization,
@@ -11,6 +12,15 @@ import {
   isBoundAuthorizationArtifact,
   type BoundAuthorizationArtifact,
 } from "./authorization-binding.js";
+import {
+  SIGNED_AUTHORIZATION_ARTIFACT_VERSION,
+  canonicalSignedPayload,
+  isSignedAuthorizationArtifact,
+  signAuthorizationPayload,
+  verifyAuthorizationPayload,
+  type SignedAuthorizationArtifact,
+} from "./authorization-crypto.js";
+import type { KeyRegistry } from "./key-registry.js";
 import { prepareTransactionAuthorization } from "./policy-transaction.js";
 import { normalizeDemoPolicy, type Evaluation } from "./policy.js";
 
@@ -43,6 +53,16 @@ export type BoundTransactionAuthorization =
       decision: "ALLOW";
       envelope: TransactionEnvelope;
       artifact: BoundAuthorizationArtifact;
+    })
+  | (Evaluation & {
+      decision: "DENY" | "UNKNOWN";
+    });
+
+export type SignedTransactionAuthorization =
+  | (Evaluation & {
+      decision: "ALLOW";
+      envelope: TransactionEnvelope;
+      artifact: SignedAuthorizationArtifact;
     })
   | (Evaluation & {
       decision: "DENY" | "UNKNOWN";
@@ -244,7 +264,7 @@ export function issueBoundTransactionAuthorizationWithStore(
     prepared.envelope.request,
   );
 
-  if (!store.issueBound(authorizationId, bindingDigest)) {
+  if (!store.issueBound(authorizationId, bindingDigest, BOUND_AUTHORIZATION_ARTIFACT_VERSION)) {
     return deny("Transaction authorization ID has already been issued or consumed.");
   }
 
@@ -261,6 +281,7 @@ export function issueBoundTransactionAuthorizationWithStore(
 /**
  * Revalidate an artifact's policy and envelope binding before atomically
  * consuming the matching issued ID. This never falls back to in-memory state.
+ * Enforces artifact_version = 1 in the storage transition.
  */
 export function consumeBoundTransactionAuthorizationWithStore(
   store: BoundAuthorizationIdStore,
@@ -303,7 +324,240 @@ export function consumeBoundTransactionAuthorizationWithStore(
     return deny("Transaction does not match the bound authorization artifact.");
   }
 
-  if (!store.consumeBound(artifact.authorizationId, bindingDigest)) {
+  if (!store.consumeBound(artifact.authorizationId, bindingDigest, artifact.version)) {
+    return deny("Bound transaction authorization is unknown, consumed, or mismatched.");
+  }
+
+  return result;
+}
+
+/**
+ * Issue a versioned, cryptographically signed authorization artifact whose ID
+ * is persisted with the canonical request and policy binding digest.
+ * An Ed25519 signature is computed over the artifact version, authorization ID,
+ * key ID, and binding digest.
+ */
+export function issueSignedTransactionAuthorizationWithStore(
+  store: BoundAuthorizationIdStore,
+  keyRegistry: KeyRegistry,
+  signer: {
+    readonly keyId: string;
+    readonly privateKey: KeyObject | string;
+  },
+  authorizationIdInput: unknown,
+  policyInput: unknown,
+  requestInput: unknown,
+  contextInput: unknown,
+): SignedTransactionAuthorization {
+  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
+  if (authorizationId === null) {
+    return deny("A non-empty authorization ID is required.");
+  }
+
+  if (typeof signer !== "object" || signer === null) {
+    return deny("Signer specification is required.");
+  }
+
+  const keyId = normalizeAuthorizationId(signer.keyId);
+  if (keyId === null) {
+    return deny("A non-empty key ID is required.");
+  }
+
+  const keyMeta = keyRegistry.getKey(keyId);
+  if (keyMeta === null) {
+    return deny("Issuer key is unknown.");
+  }
+
+  if (keyMeta.status === "revoked") {
+    return deny("Issuer key has been revoked.");
+  }
+
+  if (keyMeta.status === "retired") {
+    return deny("Issuer key is retired and cannot issue new authorizations.");
+  }
+
+  if (keyMeta.status !== "active") {
+    return deny("Issuer key is not active.");
+  }
+
+  if (
+    typeof contextInput === "object" &&
+    contextInput !== null &&
+    "nowSeconds" in contextInput &&
+    typeof (contextInput as { nowSeconds: unknown }).nowSeconds === "number"
+  ) {
+    const now = (contextInput as { nowSeconds: number }).nowSeconds;
+    if (keyMeta.validFromSeconds !== undefined && now < keyMeta.validFromSeconds) {
+      return deny("Issuer key is not yet valid.");
+    }
+    if (keyMeta.expiresAtSeconds !== undefined && now >= keyMeta.expiresAtSeconds) {
+      return deny("Issuer key has expired.");
+    }
+  }
+
+  const prepared = prepareTransactionAuthorization(
+    policyInput,
+    requestInput,
+    contextInput,
+  );
+
+  if (prepared.decision !== "ALLOW") {
+    return prepared;
+  }
+
+  const policy = normalizeDemoPolicy(policyInput);
+  if (policy === null) {
+    return {
+      decision: "UNKNOWN",
+      reasons: ["Policy is malformed or unsupported."],
+    };
+  }
+
+  const bindingDigest = createAuthorizationBindingDigest(
+    policy,
+    prepared.envelope.request,
+  );
+
+  const payload = canonicalSignedPayload(
+    SIGNED_AUTHORIZATION_ARTIFACT_VERSION,
+    authorizationId,
+    keyId,
+    bindingDigest,
+  );
+
+  let signature: string;
+  try {
+    signature = signAuthorizationPayload(signer.privateKey, payload);
+  } catch {
+    return deny("Failed to sign authorization payload.");
+  }
+
+  // Pre-flight correspondence verification: ensure the private key corresponds to the registered public key
+  const isValidKeypair = verifyAuthorizationPayload(
+    keyMeta.publicKey,
+    payload,
+    signature,
+  );
+
+  if (!isValidKeypair) {
+    return deny("Signer private key does not match the registered public key.");
+  }
+
+  if (!store.issueBound(authorizationId, bindingDigest, SIGNED_AUTHORIZATION_ARTIFACT_VERSION)) {
+    return deny("Transaction authorization ID has already been issued or consumed.");
+  }
+
+  return {
+    ...prepared,
+    artifact: Object.freeze({
+      version: SIGNED_AUTHORIZATION_ARTIFACT_VERSION,
+      authorizationId,
+      keyId,
+      bindingDigest,
+      signature,
+    }),
+  };
+}
+
+/**
+ * Revalidate an Ed25519-signed artifact's cryptographic signature, key status,
+ * policy, and envelope binding before atomically consuming the issued ID in SQLite.
+ *
+ * CRITICAL INVARIANT: Format parsing, key status verification, and Ed25519
+ * signature verification occur BEFORE policy revalidation and BEFORE calling
+ * the database. Forged, tampered, or invalid signatures fail closed immediately
+ * without touching SQLite storage.
+ * Enforces artifact_version = 2 in the storage transition.
+ */
+export function consumeSignedTransactionAuthorizationWithStore(
+  store: BoundAuthorizationIdStore,
+  keyRegistry: KeyRegistry,
+  artifactInput: unknown,
+  policyInput: unknown,
+  envelopeInput: unknown,
+  candidateInput: unknown,
+  contextInput: unknown,
+): TransactionAuthorization {
+  if (!isSignedAuthorizationArtifact(artifactInput)) {
+    return deny("Signed transaction authorization artifact is invalid.");
+  }
+
+  const artifact: SignedAuthorizationArtifact = artifactInput;
+
+  const keyMeta = keyRegistry.getKey(artifact.keyId);
+  if (keyMeta === null) {
+    return deny("Issuer key is unknown.");
+  }
+
+  if (keyMeta.status === "revoked") {
+    return deny("Issuer key has been revoked.");
+  }
+
+  if (keyMeta.status !== "active" && keyMeta.status !== "retired") {
+    return deny("Issuer key status does not permit verification.");
+  }
+
+  if (
+    typeof contextInput === "object" &&
+    contextInput !== null &&
+    "nowSeconds" in contextInput &&
+    typeof (contextInput as { nowSeconds: unknown }).nowSeconds === "number"
+  ) {
+    const now = (contextInput as { nowSeconds: number }).nowSeconds;
+    if (keyMeta.validFromSeconds !== undefined && now < keyMeta.validFromSeconds) {
+      return deny("Issuer key is not yet valid.");
+    }
+    if (keyMeta.expiresAtSeconds !== undefined && now >= keyMeta.expiresAtSeconds) {
+      return deny("Issuer key has expired.");
+    }
+  }
+
+  const payload = canonicalSignedPayload(
+    artifact.version,
+    artifact.authorizationId,
+    artifact.keyId,
+    artifact.bindingDigest,
+  );
+
+  const isValidSignature = verifyAuthorizationPayload(
+    keyMeta.publicKey,
+    payload,
+    artifact.signature,
+  );
+
+  if (!isValidSignature) {
+    return deny("Invalid authorization artifact signature.");
+  }
+
+  const result = revalidateTransactionAuthorization(
+    policyInput,
+    envelopeInput,
+    candidateInput,
+    contextInput,
+  );
+
+  if (result.decision !== "ALLOW") {
+    return result;
+  }
+
+  const policy = normalizeDemoPolicy(policyInput);
+  if (policy === null) {
+    return {
+      decision: "UNKNOWN",
+      reasons: ["Policy is malformed or unsupported."],
+    };
+  }
+
+  const bindingDigest = createAuthorizationBindingDigest(
+    policy,
+    result.envelope.request,
+  );
+
+  if (bindingDigest !== artifact.bindingDigest) {
+    return deny("Transaction does not match the bound authorization artifact.");
+  }
+
+  if (!store.consumeBound(artifact.authorizationId, bindingDigest, artifact.version)) {
     return deny("Bound transaction authorization is unknown, consumed, or mismatched.");
   }
 
