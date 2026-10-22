@@ -163,6 +163,109 @@ export function isSignedAuthorizationArtifact(
   );
 }
 
+export const SIGNED_AUTHORIZATION_ARTIFACT_VERSION_V3 = 3 as const;
+
+export interface SignedAuthorizationArtifactV3 {
+  readonly version: typeof SIGNED_AUTHORIZATION_ARTIFACT_VERSION_V3;
+  readonly authorizationId: string;
+  readonly keyId: string;
+  readonly issuedAtSeconds: number;
+  readonly expiresAtSeconds: number;
+  readonly policyId: string;
+  readonly policyRevision: number;
+  readonly bindingDigest: string;
+  readonly signature: string;
+}
+
+/**
+ * Deterministic length-prefixed canonical encoding for signed authorization payloads v3.
+ * Binds artifact version (3), authorization ID, key ID, issued-at Unix timestamp,
+ * authorization expiry Unix timestamp, policy ID, policy revision, and binding digest.
+ */
+export function canonicalSignedPayloadV3(params: {
+  version: number;
+  authorizationId: string;
+  keyId: string;
+  issuedAtSeconds: number;
+  expiresAtSeconds: number;
+  policyId: string;
+  policyRevision: number;
+  bindingDigest: string;
+}): string {
+  if (
+    params.version !== SIGNED_AUTHORIZATION_ARTIFACT_VERSION_V3 ||
+    typeof params.authorizationId !== "string" ||
+    params.authorizationId.trim().length === 0 ||
+    params.authorizationId !== params.authorizationId.trim() ||
+    typeof params.keyId !== "string" ||
+    params.keyId.trim().length === 0 ||
+    params.keyId !== params.keyId.trim() ||
+    !Number.isSafeInteger(params.issuedAtSeconds) ||
+    params.issuedAtSeconds < 0 ||
+    !Number.isSafeInteger(params.expiresAtSeconds) ||
+    params.expiresAtSeconds <= params.issuedAtSeconds ||
+    typeof params.policyId !== "string" ||
+    params.policyId.trim().length === 0 ||
+    params.policyId !== params.policyId.trim() ||
+    !Number.isSafeInteger(params.policyRevision) ||
+    params.policyRevision < 1 ||
+    typeof params.bindingDigest !== "string" ||
+    !DIGEST_REGEX.test(params.bindingDigest)
+  ) {
+    throw new Error("Invalid parameters for canonicalSignedPayloadV3.");
+  }
+
+  return [
+    "web3user-signed-authorization-v3\n",
+    encodeField("artifact.version", String(params.version)),
+    encodeField("artifact.authorizationId", params.authorizationId),
+    encodeField("key.keyId", params.keyId),
+    encodeField("artifact.issuedAtSeconds", String(params.issuedAtSeconds)),
+    encodeField("artifact.expiresAtSeconds", String(params.expiresAtSeconds)),
+    encodeField("policy.policyId", params.policyId),
+    encodeField("policy.policyRevision", String(params.policyRevision)),
+    encodeField("artifact.bindingDigest", params.bindingDigest),
+  ].join("");
+}
+
+/**
+ * Strictly validate a signed authorization artifact format v3.
+ */
+export function isSignedAuthorizationArtifactV3(
+  input: unknown,
+): input is SignedAuthorizationArtifactV3 {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return false;
+  }
+
+  const artifact = input as Record<string, unknown>;
+  return (
+    artifact.version === SIGNED_AUTHORIZATION_ARTIFACT_VERSION_V3 &&
+    typeof artifact.authorizationId === "string" &&
+    artifact.authorizationId.trim().length > 0 &&
+    artifact.authorizationId === artifact.authorizationId.trim() &&
+    typeof artifact.keyId === "string" &&
+    artifact.keyId.trim().length > 0 &&
+    artifact.keyId === artifact.keyId.trim() &&
+    typeof artifact.issuedAtSeconds === "number" &&
+    Number.isSafeInteger(artifact.issuedAtSeconds) &&
+    artifact.issuedAtSeconds >= 0 &&
+    typeof artifact.expiresAtSeconds === "number" &&
+    Number.isSafeInteger(artifact.expiresAtSeconds) &&
+    artifact.expiresAtSeconds > artifact.issuedAtSeconds &&
+    typeof artifact.policyId === "string" &&
+    artifact.policyId.trim().length > 0 &&
+    artifact.policyId === artifact.policyId.trim() &&
+    typeof artifact.policyRevision === "number" &&
+    Number.isSafeInteger(artifact.policyRevision) &&
+    artifact.policyRevision >= 1 &&
+    typeof artifact.bindingDigest === "string" &&
+    DIGEST_REGEX.test(artifact.bindingDigest) &&
+    typeof artifact.signature === "string" &&
+    SIGNATURE_REGEX.test(artifact.signature)
+  );
+}
+
 /**
  * Utility to generate an ephemeral or permanent Ed25519 keypair with PEM representations.
  */
