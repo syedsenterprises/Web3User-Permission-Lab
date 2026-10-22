@@ -1,5 +1,10 @@
 ﻿import { DatabaseSync } from "node:sqlite";
 
+/**
+ * Contract required by the persistent consumption boundary: `reserve` must
+ * durably and atomically reserve a unique ID, and must throw on storage
+ * failure. An in-memory implementation does not satisfy this contract.
+ */
 export interface AuthorizationIdStore {
   reserve(authorizationId: string): boolean;
   close(): void;
@@ -7,7 +12,8 @@ export interface AuthorizationIdStore {
 
 /**
  * Persistent, atomic authorization-ID reservation.
- * The database must be stored on a durable local filesystem.
+ * The database must be stored on a durable local filesystem and shared by
+ * every caller that needs common replay protection.
  */
 export class SQLiteAuthorizationStore implements AuthorizationIdStore {
   private readonly db: DatabaseSync;

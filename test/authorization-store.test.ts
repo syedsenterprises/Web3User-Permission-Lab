@@ -6,13 +6,21 @@ import { SQLiteAuthorizationStore } from "../src/authorization-store.js";
 
 describe("SQLiteAuthorizationStore", () => {
   let directory: string | undefined;
+  const stores = new Set<SQLiteAuthorizationStore>();
 
   function createStore() {
     directory ??= mkdtempSync(join(tmpdir(), "web3user-auth-"));
-    return new SQLiteAuthorizationStore(join(directory, "auth.sqlite"));
+    const store = new SQLiteAuthorizationStore(join(directory, "auth.sqlite"));
+    stores.add(store);
+    return store;
+  }
+
+  function closeStore(store: SQLiteAuthorizationStore) {
+    if (stores.delete(store)) store.close();
   }
 
   afterEach(() => {
+    for (const store of stores) closeStore(store);
     if (directory) {
       rmSync(directory, { recursive: true, force: true });
       directory = undefined;
@@ -26,14 +34,14 @@ describe("SQLiteAuthorizationStore", () => {
       expect(store.reserve("auth-001")).toBe(true);
       expect(store.reserve("auth-001")).toBe(false);
     } finally {
-      store.close();
+      closeStore(store);
     }
   });
 
   it("preserves consumed IDs after reopening the database", () => {
     const first = createStore();
     first.reserve("auth-persistent-001");
-    first.close();
+    closeStore(first);
 
     const second = createStore();
 
@@ -41,11 +49,11 @@ describe("SQLiteAuthorizationStore", () => {
       expect(second.reserve("auth-persistent-001")).toBe(false);
       expect(second.reserve("auth-persistent-002")).toBe(true);
     } finally {
-      second.close();
+      closeStore(second);
     }
   });
 
-  it("rejects duplicate reservations from separate connections", () => {
+  it("allows only one competing reservation from separate connections", () => {
     const first = createStore();
     const second = createStore();
 
@@ -57,8 +65,8 @@ describe("SQLiteAuthorizationStore", () => {
 
       expect(results.filter(Boolean)).toHaveLength(1);
     } finally {
-      first.close();
-      second.close();
+      closeStore(first);
+      closeStore(second);
     }
   });
 });
@@ -74,13 +82,21 @@ import type { TransactionRequest } from "../src/transaction-envelope.js";
 
 describe("persistent authorization consumption", () => {
   let directory: string | undefined;
+  const stores = new Set<SQLiteAuthorizationStore>();
 
   function createStore() {
     directory ??= mkdtempSync(join(tmpdir(), "web3user-lifecycle-"));
-    return new SQLiteAuthorizationStore(join(directory, "auth.sqlite"));
+    const store = new SQLiteAuthorizationStore(join(directory, "auth.sqlite"));
+    stores.add(store);
+    return store;
+  }
+
+  function closeStore(store: SQLiteAuthorizationStore) {
+    if (stores.delete(store)) store.close();
   }
 
   afterEach(() => {
+    for (const store of stores) closeStore(store);
     if (directory) {
       rmSync(directory, { recursive: true, force: true });
       directory = undefined;
@@ -142,7 +158,34 @@ describe("persistent authorization consumption", () => {
         ).decision,
       ).toBe("DENY");
     } finally {
-      store.close();
+      closeStore(store);
+    }
+  });
+
+  it("trims IDs consistently and compares the normalized value case-sensitively", () => {
+    const store = createStore();
+    const first = prepareTransactionAuthorization(policy, request, context);
+    const second = prepareTransactionAuthorization(policy, request, context);
+
+    expect(first.decision).toBe("ALLOW");
+    expect(second.decision).toBe("ALLOW");
+    if (first.decision !== "ALLOW" || second.decision !== "ALLOW") {
+      closeStore(store);
+      return;
+    }
+
+    try {
+      expect(consumeTransactionAuthorizationWithStore(
+        store, "  Auth-Normalized-001\t", policy,
+        first.envelope, request, context,
+      ).decision).toBe("ALLOW");
+      expect(consumeTransactionAuthorizationWithStore(
+        store, "Auth-Normalized-001", policy,
+        second.envelope, request, context,
+      ).decision).toBe("DENY");
+      expect(store.reserve("auth-normalized-001")).toBe(true);
+    } finally {
+      closeStore(store);
     }
   });
 
@@ -152,7 +195,7 @@ describe("persistent authorization consumption", () => {
 
     expect(prepared.decision).toBe("ALLOW");
     if (prepared.decision !== "ALLOW") {
-      firstStore.close();
+      closeStore(firstStore);
       return;
     }
 
@@ -170,7 +213,7 @@ describe("persistent authorization consumption", () => {
         ).decision,
       ).toBe("ALLOW");
     } finally {
-      firstStore.close();
+      closeStore(firstStore);
     }
 
     const secondStore = createStore();
@@ -182,7 +225,7 @@ describe("persistent authorization consumption", () => {
 
     expect(secondPrepared.decision).toBe("ALLOW");
     if (secondPrepared.decision !== "ALLOW") {
-      secondStore.close();
+      closeStore(secondStore);
       return;
     }
 
@@ -198,7 +241,7 @@ describe("persistent authorization consumption", () => {
         ).decision,
       ).toBe("DENY");
     } finally {
-      secondStore.close();
+      closeStore(secondStore);
     }
   });
   it("does not reserve an ID when policy validation fails", () => {
@@ -207,7 +250,7 @@ describe("persistent authorization consumption", () => {
 
     expect(prepared.decision).toBe("ALLOW");
     if (prepared.decision !== "ALLOW") {
-      store.close();
+      closeStore(store);
       return;
     }
 
@@ -221,7 +264,87 @@ describe("persistent authorization consumption", () => {
 
       expect(store.reserve("persistent-retry-001")).toBe(true);
     } finally {
-      store.close();
+      closeStore(store);
+    }
+  });
+
+  it.each([null, undefined, 42, "", " \t\n "])(
+    "rejects malformed or blank persistent authorization IDs: %s",
+    (authorizationId) => {
+      const store = createStore();
+      const prepared = prepareTransactionAuthorization(policy, request, context);
+      expect(prepared.decision).toBe("ALLOW");
+      if (prepared.decision !== "ALLOW") {
+        closeStore(store);
+        return;
+      }
+
+      try {
+        expect(consumeTransactionAuthorizationWithStore(
+          store, authorizationId, policy,
+          prepared.envelope, request, context,
+        ).decision).toBe("DENY");
+        expect(store.reserve("valid-after-invalid-id")).toBe(true);
+      } finally {
+        closeStore(store);
+      }
+    },
+  );
+
+  it("propagates storage failures without returning ALLOW", () => {
+    const prepared = prepareTransactionAuthorization(policy, request, context);
+    expect(prepared.decision).toBe("ALLOW");
+    if (prepared.decision !== "ALLOW") return;
+
+    const failure = new Error("storage unavailable");
+    const failingStore = {
+      reserve: () => { throw failure; },
+      close: () => {},
+    };
+
+    expect(() => consumeTransactionAuthorizationWithStore(
+      failingStore, "persistent-storage-error-001", policy,
+      prepared.envelope, request, context,
+    )).toThrow(failure);
+  });
+
+  it("rechecks request binding, expiry, and revocation before reserving", () => {
+    const store = createStore();
+    const cases = [
+      {
+        id: "persistent-binding-recheck-001",
+        candidate: { ...request, value: "1" },
+        currentPolicy: policy,
+        currentContext: context,
+      },
+      {
+        id: "persistent-expiry-recheck-001",
+        candidate: request,
+        currentPolicy: policy,
+        currentContext: { nowSeconds: policy.expiresAt },
+      },
+      {
+        id: "persistent-revocation-recheck-001",
+        candidate: request,
+        currentPolicy: { ...policy, revoked: true },
+        currentContext: context,
+      },
+    ];
+
+    try {
+      for (const item of cases) {
+        const prepared = prepareTransactionAuthorization(policy, request, context);
+        expect(prepared.decision).toBe("ALLOW");
+        if (prepared.decision !== "ALLOW") continue;
+
+        expect(consumeTransactionAuthorizationWithStore(
+          store, item.id, item.currentPolicy,
+          prepared.envelope, item.candidate, item.currentContext,
+        ).decision).toBe("DENY");
+        expect(store.reserve(item.id)).toBe(true);
+      }
+    } finally {
+      closeStore(store);
     }
   });
 });

@@ -20,6 +20,16 @@ function deny(reason: string): TransactionAuthorization {
 }
 
 /**
+ * Authorization IDs are trimmed, non-empty strings. Comparison is
+ * case-sensitive; the caller is responsible for issuing and binding IDs.
+ */
+function normalizeAuthorizationId(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const normalized = input.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+/**
  * Revalidate and consume an authorization synchronously.
  *
  * Envelope consumption and optional authorization-ID consumption share
@@ -87,11 +97,12 @@ export function consumeTransactionAuthorization(
 }
 
 /**
- * Consume an authorization using a stable ID from a trusted issuer.
+ * Consume an authorization using an ID supplied by the caller.
  *
- * A successful ID is reserved only after policy revalidation succeeds.
- * IDs and envelope consumption are process-local; this is not durable
- * or distributed replay protection.
+ * IDs are trimmed and compared case-sensitively. A successful ID is
+ * reserved only after policy revalidation succeeds. Replay state is
+ * process-local and is lost on restart; this API is not durable or shared
+ * across processes. The caller is responsible for ID issuance and binding.
  */
 export function consumeTransactionAuthorizationById(
   authorizationIdInput: unknown,
@@ -100,10 +111,8 @@ export function consumeTransactionAuthorizationById(
   candidateInput: unknown,
   contextInput: unknown,
 ): TransactionAuthorization {
-  if (
-    typeof authorizationIdInput !== "string" ||
-    authorizationIdInput.trim().length === 0
-  ) {
+  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
+  if (authorizationId === null) {
     return deny("A non-empty authorization ID is required.");
   }
 
@@ -112,13 +121,20 @@ export function consumeTransactionAuthorizationById(
     envelopeInput,
     candidateInput,
     contextInput,
-    authorizationIdInput.trim(),
+    authorizationId,
   );
 }
 
 /**
- * Revalidate an authorization and reserve its ID in persistent storage.
- * The store must enforce atomic uniqueness for authorization IDs.
+ * Persistent authorization-consumption boundary.
+ *
+ * Revalidates request binding and current policy/context before atomically
+ * reserving the normalized ID. All callers that need shared replay
+ * protection must use the same durable database. IDs are trimmed and
+ * compared case-sensitively; the caller remains responsible for ID
+ * issuance and binding. Storage errors propagate to the caller; this
+ * function never falls back to process-local reservation on storage error.
+ * This does not sign or submit a transaction.
  */
 export function consumeTransactionAuthorizationWithStore(
   store: AuthorizationIdStore,
@@ -128,10 +144,8 @@ export function consumeTransactionAuthorizationWithStore(
   candidateInput: unknown,
   contextInput: unknown,
 ): TransactionAuthorization {
-  if (
-    typeof authorizationIdInput !== "string" ||
-    authorizationIdInput.trim().length === 0
-  ) {
+  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
+  if (authorizationId === null) {
     return deny("A non-empty authorization ID is required.");
   }
 
@@ -150,7 +164,9 @@ export function consumeTransactionAuthorizationWithStore(
     return result;
   }
 
-  if (!store.reserve(authorizationIdInput.trim())) {
+  // SQLite or custom-store errors intentionally propagate. No success result
+  // is returned unless persistent reservation has completed successfully.
+  if (!store.reserve(authorizationId)) {
     return deny("Transaction authorization ID has already been consumed.");
   }
 
