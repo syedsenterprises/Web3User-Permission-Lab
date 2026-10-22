@@ -8,6 +8,10 @@ import {
   DEFAULT_AUTHORIZATION_TTL_SECONDS,
   consumeSignedTransactionAuthorizationV3,
   issueSignedTransactionAuthorizationV3,
+  consumeBoundTransactionAuthorizationWithStore,
+  issueBoundTransactionAuthorizationWithStore,
+  consumeSignedTransactionAuthorizationWithStore,
+  issueSignedTransactionAuthorizationWithStore,
 } from "../src/authorization-lifecycle.js";
 import {
   canonicalSignedPayloadV3,
@@ -1127,6 +1131,376 @@ describe("Milestone 6.2 Phase 3: V3 Canonical Signing, Issuance & Consumption Pi
     } finally {
       store1.close();
       store2.close();
+    }
+  });
+
+  // 20. Fix SEC-63-01: Persisted-clock race condition between connections is closed
+  it("uses persisted high-water mark derived inside transaction to prevent TOCTOU race (SEC-63-01)", () => {
+    const dbFile = databasePath();
+    const clock1 = new TestClock(1000);
+    const clock2 = new TestClock(1000);
+    const store1 = new SQLiteAuthorizationStore(dbFile, clock1);
+    const store2 = new SQLiteAuthorizationStore(dbFile, clock2);
+    const key = createKeypair();
+
+    try {
+      store1.getPolicyStore().registerPolicy(validPolicy);
+      store1.getKeyStore().registerKey({
+        keyId: "key-toctou",
+        publicKey: key.publicKey,
+        status: "active",
+        validFromSeconds: 1000,
+        expiresAtSeconds: 9000,
+      });
+
+      // 1. Issue artifact at t=1000 with TTL=100s -> expiresAt = 1100
+      const issueRes = issueSignedTransactionAuthorizationV3(
+        store1,
+        { keyId: "key-toctou", privateKey: key.privateKey },
+        "auth-toctou-race",
+        "policy-v3-alpha",
+        validRequest,
+        { ttlSeconds: 100 },
+      );
+      expect(issueRes.decision).toBe("ALLOW");
+      if (issueRes.decision !== "ALLOW") return;
+      expect(issueRes.artifact.expiresAtSeconds).toBe(1100);
+
+      // 2. Simulate competing connection race:
+      // Between store1's initial clock snapshot (t=1050, within validity window < 1100)
+      // and transaction acquisition, store2 advances the high-water mark to t=1150.
+      let triggerRace = false;
+      let snapshotCount = 0;
+      const racingClock = {
+        nowSeconds(): number {
+          if (triggerRace) {
+            snapshotCount++;
+            if (snapshotCount === 1) {
+              // Initial snapshot taken before transaction acquisition:
+              // competing connection intervenes and advances persistent high-water mark to 1150
+              clock2.set(1150);
+              store2.advanceHighWaterMark(1150);
+              return 1050;
+            }
+            return 1150;
+          }
+          return 1050;
+        },
+      };
+      const racingStore = new SQLiteAuthorizationStore(dbFile, racingClock);
+      triggerRace = true;
+
+      // When racingStore calls consumeSignedTransactionAuthorizationV3:
+      // Initial snapshot is 1050 (< 1100).
+      // Inside transaction, it derives effectiveNowSeconds = max(1050, 1150) = 1150.
+      // Since 1150 >= artifact.expiresAtSeconds (1100), consumption MUST BE DENIED with expiry reason!
+      const consumeRes = consumeSignedTransactionAuthorizationV3(
+        racingStore,
+        issueRes.artifact,
+        issueRes.envelope,
+        validRequest,
+      );
+      expect(consumeRes.decision).toBe("DENY");
+      expect(consumeRes.reasons).toContain("Signed transaction authorization has expired.");
+
+      racingStore.close();
+
+      // Verify authorization record in database remains in 'issued' state (was not consumed)
+      const record = store1.getAuthorizationRecord("auth-toctou-race");
+      expect(record?.state).toBe("issued");
+    } finally {
+      store1.close();
+      store2.close();
+    }
+  });
+
+  // 21. Fix SEC-63-02: Key registration in retired or revoked status requires timestamps
+  it("enforces timestamp requirements when registering or importing retired/revoked keys and prevents post-retirement forgery (SEC-63-02)", () => {
+    const dbFile = databasePath();
+    const { keyStore, authStore, policyStore } = setupStores(dbFile, 1000);
+    const key = createKeypair();
+
+    try {
+      policyStore.registerPolicy(validPolicy);
+
+      // 1. Registering retired key without retiredAtSeconds throws
+      expect(() => {
+        keyStore.registerKey({
+          keyId: "key-retired-invalid",
+          publicKey: key.publicKey,
+          status: "retired",
+        });
+      }).toThrow("without a valid non-negative safe integer 'retiredAtSeconds'");
+
+      // 2. Registering revoked key without revokedAtSeconds throws
+      expect(() => {
+        keyStore.registerKey({
+          keyId: "key-revoked-invalid",
+          publicKey: key.publicKey,
+          status: "revoked",
+        });
+      }).toThrow("without a valid non-negative safe integer 'revokedAtSeconds'");
+
+      // 3. Registering retired key with retiredAtSeconds < validFromSeconds throws
+      expect(() => {
+        keyStore.registerKey({
+          keyId: "key-retired-before-valid",
+          publicKey: key.publicKey,
+          status: "retired",
+          validFromSeconds: 1500,
+          retiredAtSeconds: 1200,
+        });
+      }).toThrow("cannot precede validFromSeconds");
+
+      // 4. Successfully register key with initial retired status and valid timestamps
+      keyStore.registerKey({
+        keyId: "key-retired-valid",
+        publicKey: key.publicKey,
+        status: "retired",
+        validFromSeconds: 1000,
+        retiredAtSeconds: 1500,
+      });
+
+      const keyMeta = keyStore.getKey("key-retired-valid");
+      expect(keyMeta?.status).toBe("retired");
+      expect(keyMeta?.retiredAtSeconds).toBe(1500);
+
+      // 5. Issuing new authorization with this retired key is immediately rejected
+      const issueRes = issueSignedTransactionAuthorizationV3(
+        authStore,
+        { keyId: "key-retired-valid", privateKey: key.privateKey },
+        "auth-new-from-retired",
+        "policy-v3-alpha",
+        validRequest,
+      );
+      expect(issueRes.decision).toBe("DENY");
+      expect(issueRes.reasons).toContain("Issuer key is retired and cannot issue new authorizations.");
+
+      // 6. Forged artifact claiming issuedAtSeconds = 1600 (after retirement 1500) is rejected on consumption
+      const forgedPayload = canonicalSignedPayloadV3({
+        version: 3,
+        authorizationId: "auth-forged-after-retire",
+        keyId: "key-retired-valid",
+        issuedAtSeconds: 1600,
+        expiresAtSeconds: 1900,
+        policyId: "policy-v3-alpha",
+        policyRevision: 1,
+        bindingDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      });
+      const forgedSig = signAuthorizationPayload(key.privateKey, forgedPayload);
+      const forgedArtifact = {
+        version: 3 as const,
+        authorizationId: "auth-forged-after-retire",
+        keyId: "key-retired-valid",
+        issuedAtSeconds: 1600,
+        expiresAtSeconds: 1900,
+        policyId: "policy-v3-alpha",
+        policyRevision: 1,
+        bindingDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        signature: forgedSig,
+      };
+
+      const consumeRes = consumeSignedTransactionAuthorizationV3(
+        authStore,
+        forgedArtifact,
+        { request: validRequest },
+        validRequest,
+      );
+      expect(consumeRes.decision).toBe("DENY");
+      expect(consumeRes.reasons).toContain(
+        "Authorization was issued after issuer key was retired."
+      );
+    } finally {
+      authStore.close();
+    }
+  });
+
+  // 22. Phase E: Cross-version API rejections
+  it("rejects cross-version artifacts across V1, V2, and V3 consumption APIs", () => {
+    const dbFile = databasePath();
+    const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+    const key = createKeypair();
+
+    try {
+      policyStore.registerPolicy(validPolicy);
+      keyStore.registerKey({ keyId: "key-cross-version", publicKey: key.publicKey, status: "active" });
+
+      const artifactV1 = {
+        version: 1 as const,
+        authorizationId: "auth-v1",
+        bindingDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      };
+
+      const artifactV2 = {
+        version: 2 as const,
+        authorizationId: "auth-v2",
+        keyId: "key-cross-version",
+        bindingDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        signature: "sig-dummy",
+      };
+
+      const artifactV3 = {
+        version: 3 as const,
+        authorizationId: "auth-v3",
+        keyId: "key-cross-version",
+        issuedAtSeconds: 1000,
+        expiresAtSeconds: 1300,
+        policyId: "policy-v3-alpha",
+        policyRevision: 1,
+        bindingDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        signature: "sig-dummy",
+      };
+
+      // 1. V3 API rejects V1 and V2 artifacts
+      const v3RejectsV1 = consumeSignedTransactionAuthorizationV3(
+        authStore,
+        artifactV1,
+        { request: validRequest },
+        validRequest,
+      );
+      expect(v3RejectsV1.decision).toBe("DENY");
+      expect(v3RejectsV1.reasons).toContain("Signed transaction authorization artifact is invalid or malformed.");
+
+      const v3RejectsV2 = consumeSignedTransactionAuthorizationV3(
+        authStore,
+        artifactV2,
+        { request: validRequest },
+        validRequest,
+      );
+      expect(v3RejectsV2.decision).toBe("DENY");
+      expect(v3RejectsV2.reasons).toContain("Signed transaction authorization artifact is invalid or malformed.");
+
+      // 2. V2 API rejects V1 and V3 artifacts
+      const v2RejectsV1 = consumeSignedTransactionAuthorizationWithStore(
+        authStore,
+        keyStore,
+        artifactV1,
+        validPolicy,
+        { request: validRequest },
+        validRequest,
+        { nowSeconds: 1000 },
+      );
+      expect(v2RejectsV1.decision).toBe("DENY");
+      expect(v2RejectsV1.reasons).toContain("Signed transaction authorization artifact is invalid.");
+
+      const v2RejectsV3 = consumeSignedTransactionAuthorizationWithStore(
+        authStore,
+        keyStore,
+        artifactV3,
+        validPolicy,
+        { request: validRequest },
+        validRequest,
+        { nowSeconds: 1000 },
+      );
+      expect(v2RejectsV3.decision).toBe("DENY");
+      expect(v2RejectsV3.reasons).toContain("Signed transaction authorization artifact is invalid.");
+
+      // 3. V1 API rejects V2 and V3 artifacts
+      const v1RejectsV2 = consumeBoundTransactionAuthorizationWithStore(
+        authStore,
+        artifactV2,
+        validPolicy,
+        { request: validRequest },
+        validRequest,
+        { nowSeconds: 1000 },
+      );
+      expect(v1RejectsV2.decision).toBe("DENY");
+      expect(v1RejectsV2.reasons).toContain("Bound transaction authorization artifact is invalid.");
+
+      const v1RejectsV3 = consumeBoundTransactionAuthorizationWithStore(
+        authStore,
+        artifactV3,
+        validPolicy,
+        { request: validRequest },
+        validRequest,
+        { nowSeconds: 1000 },
+      );
+      expect(v1RejectsV3.decision).toBe("DENY");
+      expect(v1RejectsV3.reasons).toContain("Bound transaction authorization artifact is invalid.");
+    } finally {
+      authStore.close();
+    }
+  });
+
+  // 23. Phase E: SQLiteAuthorizationStore with allowLegacyArtifactVersions: false fails closed
+  it("enforces fail-closed behavior when allowLegacyArtifactVersions is set to false", () => {
+    const dbFile = databasePath();
+    const clock = new TestClock(1000);
+    const store = new SQLiteAuthorizationStore(dbFile, clock, { allowLegacyArtifactVersions: false });
+    const key = createKeypair();
+
+    try {
+      store.getPolicyStore().registerPolicy(validPolicy);
+      store.getKeyStore().registerKey({ keyId: "key-no-legacy", publicKey: key.publicKey, status: "active" });
+
+      // 1. Calling reserve() directly fails closed
+      expect(() => {
+        store.reserve("auth-legacy-reserve");
+      }).toThrow("Legacy authorization artifact versions are disabled by configuration.");
+
+      // 2. Calling issueBound() directly fails closed for legacy versions 1 and 2
+      expect(() => {
+        store.issueBound("auth-legacy-issue-1", "sha256:dummy", 1);
+      }).toThrow("Legacy authorization artifact versions are disabled by configuration.");
+      expect(() => {
+        store.issueBound("auth-legacy-issue-2", "sha256:dummy", 2);
+      }).toThrow("Legacy authorization artifact versions are disabled by configuration.");
+
+      // 3. Calling consumeBound() directly fails closed for legacy versions 1 and 2
+      expect(() => {
+        store.consumeBound("auth-legacy-consume-1", "sha256:dummy", 1);
+      }).toThrow("Legacy authorization artifact versions are disabled by configuration.");
+      expect(() => {
+        store.consumeBound("auth-legacy-consume-2", "sha256:dummy", 2);
+      }).toThrow("Legacy authorization artifact versions are disabled by configuration.");
+
+      // 4. V1 issuance fails closed by throwing configuration error
+      expect(() => {
+        issueBoundTransactionAuthorizationWithStore(
+          store,
+          "auth-v1-attempt",
+          validPolicy,
+          validRequest,
+          { nowSeconds: 1000 },
+        );
+      }).toThrow("Legacy authorization artifact versions are disabled by configuration.");
+
+      // 5. V2 issuance fails closed by throwing configuration error
+      expect(() => {
+        issueSignedTransactionAuthorizationWithStore(
+          store,
+          store.getKeyStore(),
+          { keyId: "key-no-legacy", privateKey: key.privateKey },
+          "auth-v2-attempt",
+          validPolicy,
+          validRequest,
+          { nowSeconds: 1000 },
+        );
+      }).toThrow("Legacy authorization artifact versions are disabled by configuration.");
+
+      // 6. V3 issuance and consumption continue to succeed!
+      const v3IssueRes = issueSignedTransactionAuthorizationV3(
+        store,
+        { keyId: "key-no-legacy", privateKey: key.privateKey },
+        "auth-v3-allowed",
+        "policy-v3-alpha",
+        validRequest,
+      );
+      expect(v3IssueRes.decision).toBe("ALLOW");
+      if (v3IssueRes.decision !== "ALLOW") return;
+
+      const v3ConsumeRes = consumeSignedTransactionAuthorizationV3(
+        store,
+        v3IssueRes.artifact,
+        v3IssueRes.envelope,
+        validRequest,
+      );
+      expect(v3ConsumeRes.decision).toBe("ALLOW");
+      const record = store.getAuthorizationRecord("auth-v3-allowed");
+      expect(record?.state).toBe("consumed");
+      expect(record?.artifactVersion).toBe(3);
+    } finally {
+      store.close();
     }
   });
 });

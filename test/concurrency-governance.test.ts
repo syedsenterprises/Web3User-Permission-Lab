@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { SQLiteAuthorizationStore } from "../src/authorization-store.js";
 import { TestClock } from "../src/clock.js";
 import { SQLiteKeyStore } from "../src/key-store.js";
 import { type DemoPolicy } from "../src/policy.js";
@@ -42,7 +43,7 @@ describe("Milestone 6.2 Phase 2: Genuine Multi-Process Concurrency Governance", 
       let stdout = "";
       let stderr = "";
       const child = fork("-e", [code], {
-        execArgv: ["--import", "tsx/esm"],
+        execArgv: ["--input-type=module", "--import", "tsx/esm"],
         silent: true,
       });
 
@@ -243,4 +244,101 @@ describe("Milestone 6.2 Phase 2: Genuine Multi-Process Concurrency Governance", 
       verifyStore.close();
     }
   }, 15000);
+
+  // 4. Genuine multi-process V3 issuance and consumption contention
+  it("handles concurrent V3 issuance and consumption across distinct OS processes without data loss or corruption", async () => {
+    const dbFile = databasePath("concurrent-v3.sqlite");
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+
+    // Setup policy and key in main process
+    const mainStore = new SQLiteAuthorizationStore(dbFile, new TestClock(1000));
+    mainStore.getPolicyStore().registerPolicy(basePolicy);
+    mainStore.getKeyStore().registerKey({
+      keyId: "key-concurrent-v3",
+      publicKey,
+      status: "active",
+      validFromSeconds: 1000,
+      expiresAtSeconds: 9000,
+    });
+    mainStore.close();
+
+    const makeWorker = (workerId: number) => `
+      import { createPrivateKey } from 'node:crypto';
+      import { SQLiteAuthorizationStore } from './src/authorization-store.js';
+      import { TestClock } from './src/clock.js';
+      import {
+        issueSignedTransactionAuthorizationV3,
+        consumeSignedTransactionAuthorizationV3,
+      } from './src/authorization-lifecycle.js';
+
+      const store = new SQLiteAuthorizationStore(${JSON.stringify(dbFile)}, new TestClock(1000));
+      const privKey = createPrivateKey(${JSON.stringify(privateKeyPem)});
+      const authId = 'auth-v3-worker-' + ${workerId};
+      const req = {
+        chainId: '1',
+        sender: '0x3333333333333333333333333333333333333333',
+        target: '0x1111111111111111111111111111111111111111',
+        calldata: '0xa9059cbb' + '0000000000000000000000002222222222222222222222222222222222222222' + '0000000000000000000000000000000000000000000000000000000000000064',
+        value: '0',
+      };
+
+      const issued = issueSignedTransactionAuthorizationV3(
+        store,
+        { keyId: 'key-concurrent-v3', privateKey: privKey },
+        authId,
+        'policy-concurrent-race',
+        req,
+      );
+
+      if (issued.decision !== 'ALLOW') {
+        console.error('ISSUE_FAIL:' + JSON.stringify(issued.reasons));
+        process.exit(1);
+      }
+
+      const consumed = consumeSignedTransactionAuthorizationV3(
+        store,
+        issued.artifact,
+        issued.envelope,
+        req,
+      );
+
+      if (consumed.decision !== 'ALLOW') {
+        console.error('CONSUME_FAIL:' + JSON.stringify(consumed.reasons));
+        process.exit(1);
+      }
+
+      store.close();
+      console.log('SUCCESS:' + ${workerId});
+      process.exit(0);
+    `;
+
+    const results = await Promise.all([
+      runSubprocess(makeWorker(1)),
+      runSubprocess(makeWorker(2)),
+      runSubprocess(makeWorker(3)),
+      runSubprocess(makeWorker(4)),
+    ]);
+
+    for (const r of results) {
+      if (r.exitCode !== 0) {
+        console.error("Worker error:", r.stderr, r.stdout);
+      }
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain("SUCCESS:");
+    }
+
+    // Verify all 4 authorizations are consumed in database
+    const verifyStore = new SQLiteAuthorizationStore(dbFile, new TestClock(1000));
+    try {
+      for (let i = 1; i <= 4; i++) {
+        const record = verifyStore.getAuthorizationRecord(`auth-v3-worker-${i}`);
+        expect(record).not.toBeNull();
+        expect(record?.state).toBe("consumed");
+        expect(record?.artifactVersion).toBe(3);
+      }
+    } finally {
+      verifyStore.close();
+    }
+  }, 25000);
 });

@@ -3,6 +3,12 @@ import { DatabaseSync } from "node:sqlite";
 import { parseEd25519PublicKey } from "./authorization-crypto.js";
 import { type Clock, systemClock } from "./clock.js";
 import { type IssuerKeyMetadata, type KeyRegistry, type KeyStatus } from "./key-registry.js";
+import { withImmediateTransaction } from "./sqlite-transaction.js";
+
+export interface ImportIssuerKeyMetadata extends IssuerKeyMetadata {
+  readonly retiredAtSeconds?: number;
+  readonly revokedAtSeconds?: number;
+}
 
 export interface PersistedIssuerKeyMetadata extends IssuerKeyMetadata {
   readonly keyId: string;
@@ -18,6 +24,7 @@ export interface PersistedIssuerKeyMetadata extends IssuerKeyMetadata {
 
 export interface KeyStore extends KeyRegistry {
   registerKey(metadata: IssuerKeyMetadata): void;
+  importKey(metadata: ImportIssuerKeyMetadata): void;
   getKey(keyId: string): PersistedIssuerKeyMetadata | null;
   getKeyStatus(keyId: string): KeyStatus | null;
   listKeys(statusFilter?: KeyStatus): PersistedIssuerKeyMetadata[];
@@ -61,8 +68,7 @@ export class SQLiteKeyStore implements KeyStore {
   }
 
   private initializeSchema(): void {
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       // 1. Ensure system_clock_state exists
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS system_clock_state (
@@ -79,14 +85,7 @@ export class SQLiteKeyStore implements KeyStore {
 
       // 2. Ensure issuer_keys with schema inspection & migration
       this.ensureIssuerKeysTable();
-
-      this.db.exec("COMMIT;");
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    });
   }
 
   private ensureIssuerKeysTable(): void {
@@ -178,8 +177,7 @@ export class SQLiteKeyStore implements KeyStore {
       throw new Error("Evaluation timestamp must be a non-negative safe integer.");
     }
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT high_water_seconds FROM system_clock_state WHERE id = 1"
       ).get() as { high_water_seconds: number } | undefined;
@@ -188,12 +186,10 @@ export class SQLiteKeyStore implements KeyStore {
         this.db.prepare(
           "INSERT INTO system_clock_state (id, high_water_seconds) VALUES (1, ?)"
         ).run(nowSeconds);
-        this.db.exec("COMMIT;");
         return;
       }
 
       if (nowSeconds < row.high_water_seconds) {
-        this.db.exec("ROLLBACK;");
         throw new Error(
           `Clock rollback detected: current time (${nowSeconds}s) precedes persisted high-water mark (${row.high_water_seconds}s).`
         );
@@ -206,14 +202,7 @@ export class SQLiteKeyStore implements KeyStore {
           WHERE id = 1 AND high_water_seconds < ?
         `).run(nowSeconds, nowSeconds);
       }
-
-      this.db.exec("COMMIT;");
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    });
   }
 
   getHighWaterMark(): number | null {
@@ -223,7 +212,7 @@ export class SQLiteKeyStore implements KeyStore {
     return row ? row.high_water_seconds : null;
   }
 
-  registerKey(metadata: IssuerKeyMetadata): void {
+  registerKey(metadata: IssuerKeyMetadata | ImportIssuerKeyMetadata): void {
     if (typeof metadata !== "object" || metadata === null) {
       throw new Error("Key metadata must be a non-null object.");
     }
@@ -240,6 +229,52 @@ export class SQLiteKeyStore implements KeyStore {
     const status = metadata.status ?? "active";
     if (status !== "active" && status !== "retired" && status !== "revoked") {
       throw new Error(`Invalid key status: ${String(status)}`);
+    }
+
+    const importMeta = metadata as ImportIssuerKeyMetadata;
+    let retiredAtSeconds: number | null = null;
+    let revokedAtSeconds: number | null = null;
+
+    if (status === "retired") {
+      if (
+        importMeta.retiredAtSeconds === undefined ||
+        !Number.isSafeInteger(importMeta.retiredAtSeconds) ||
+        importMeta.retiredAtSeconds < 0
+      ) {
+        throw new Error(
+          `Cannot register key '${metadata.keyId}' in 'retired' status without a valid non-negative safe integer 'retiredAtSeconds'.`
+        );
+      }
+      if (
+        metadata.validFromSeconds !== undefined &&
+        importMeta.retiredAtSeconds < metadata.validFromSeconds
+      ) {
+        throw new Error(
+          `retiredAtSeconds (${importMeta.retiredAtSeconds}) cannot precede validFromSeconds (${metadata.validFromSeconds}).`
+        );
+      }
+      retiredAtSeconds = importMeta.retiredAtSeconds;
+    }
+
+    if (status === "revoked") {
+      if (
+        importMeta.revokedAtSeconds === undefined ||
+        !Number.isSafeInteger(importMeta.revokedAtSeconds) ||
+        importMeta.revokedAtSeconds < 0
+      ) {
+        throw new Error(
+          `Cannot register key '${metadata.keyId}' in 'revoked' status without a valid non-negative safe integer 'revokedAtSeconds'.`
+        );
+      }
+      if (
+        metadata.validFromSeconds !== undefined &&
+        importMeta.revokedAtSeconds < metadata.validFromSeconds
+      ) {
+        throw new Error(
+          `revokedAtSeconds (${importMeta.revokedAtSeconds}) cannot precede validFromSeconds (${metadata.validFromSeconds}).`
+        );
+      }
+      revokedAtSeconds = importMeta.revokedAtSeconds;
     }
 
     const parsedKey = parseEd25519PublicKey(metadata.publicKey);
@@ -261,8 +296,7 @@ export class SQLiteKeyStore implements KeyStore {
     const nowSeconds = this.clock.nowSeconds();
     this.advanceHighWaterMark(nowSeconds);
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       const existing = this.db.prepare(
         "SELECT key_id, public_key_pem, status FROM issuer_keys WHERE key_id = ?"
       ).get(metadata.keyId) as {
@@ -287,22 +321,21 @@ export class SQLiteKeyStore implements KeyStore {
         INSERT INTO issuer_keys (
           key_id, public_key_pem, status, valid_from_seconds, expires_at_seconds,
           retired_at_seconds, revoked_at_seconds, created_at
-        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, CURRENT_TIMESTAMP)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       `).run(
         metadata.keyId,
         pem,
         status,
         metadata.validFromSeconds ?? null,
         metadata.expiresAtSeconds ?? null,
+        retiredAtSeconds,
+        revokedAtSeconds,
       );
+    });
+  }
 
-      this.db.exec("COMMIT;");
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+  importKey(metadata: ImportIssuerKeyMetadata): void {
+    this.registerKey(metadata);
   }
 
   getKey(keyId: string): PersistedIssuerKeyMetadata | null {
@@ -381,8 +414,7 @@ export class SQLiteKeyStore implements KeyStore {
     // Persist clock advance first; reject rollback
     this.advanceHighWaterMark(timestamp);
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT key_id, status FROM issuer_keys WHERE key_id = ?"
       ).get(keyId) as { key_id: string; status: KeyStatus } | undefined;
@@ -396,8 +428,7 @@ export class SQLiteKeyStore implements KeyStore {
       }
 
       if (row.status === "retired") {
-        this.db.exec("COMMIT;");
-        return this.getKey(keyId)!;
+        return;
       }
 
       this.db.prepare(`
@@ -405,15 +436,9 @@ export class SQLiteKeyStore implements KeyStore {
         SET status = 'retired', retired_at_seconds = ?
         WHERE key_id = ? AND status = 'active'
       `).run(timestamp, keyId);
+    });
 
-      this.db.exec("COMMIT;");
-      return this.getKey(keyId)!;
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    return this.getKey(keyId)!;
   }
 
   revokeKey(keyId: string, revokedAtSeconds?: number): PersistedIssuerKeyMetadata {
@@ -429,8 +454,7 @@ export class SQLiteKeyStore implements KeyStore {
     // Persist clock advance first; reject rollback
     this.advanceHighWaterMark(timestamp);
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT key_id, status FROM issuer_keys WHERE key_id = ?"
       ).get(keyId) as { key_id: string; status: KeyStatus } | undefined;
@@ -440,8 +464,7 @@ export class SQLiteKeyStore implements KeyStore {
       }
 
       if (row.status === "revoked") {
-        this.db.exec("COMMIT;");
-        return this.getKey(keyId)!;
+        return;
       }
 
       this.db.prepare(`
@@ -449,15 +472,9 @@ export class SQLiteKeyStore implements KeyStore {
         SET status = 'revoked', revoked_at_seconds = ?
         WHERE key_id = ?
       `).run(timestamp, keyId);
+    });
 
-      this.db.exec("COMMIT;");
-      return this.getKey(keyId)!;
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    return this.getKey(keyId)!;
   }
 
   close(): void {

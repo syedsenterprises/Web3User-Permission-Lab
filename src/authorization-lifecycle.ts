@@ -26,6 +26,11 @@ import {
   type SignedAuthorizationArtifactV3,
 } from "./authorization-crypto.js";
 import { SQLiteAuthorizationStore } from "./authorization-store.js";
+import {
+  beginImmediateWithRetry,
+  CONTENTION_RETRY_DELAY_MS,
+  MAX_CONTENTION_RETRIES,
+} from "./sqlite-transaction.js";
 import type { KeyRegistry } from "./key-registry.js";
 import { prepareTransactionAuthorization } from "./policy-transaction.js";
 import { normalizeDemoPolicy, type Evaluation } from "./policy.js";
@@ -582,33 +587,6 @@ export interface IssueAuthorizationV3Options {
   readonly ttlSeconds?: number;
 }
 
-const MAX_CONTENTION_RETRIES = 3;
-const CONTENTION_RETRY_DELAY_MS = 25;
-
-function sleepSync(ms: number): void {
-  const start = Date.now();
-  while (Date.now() - start < ms) {
-    // busy wait
-  }
-}
-
-function beginImmediateWithRetry(db: import("node:sqlite").DatabaseSync): boolean {
-  let attempt = 0;
-  while (attempt < MAX_CONTENTION_RETRIES) {
-    attempt++;
-    try {
-      db.exec("BEGIN IMMEDIATE;");
-      return true;
-    } catch (err) {
-      if (err instanceof Error && /busy|locked/i.test(err.message) && attempt < MAX_CONTENTION_RETRIES) {
-        sleepSync(CONTENTION_RETRY_DELAY_MS);
-        continue;
-      }
-      return false;
-    }
-  }
-  return false;
-}
 
 export type SignedTransactionAuthorizationV3 =
   | (Evaluation & {
@@ -675,22 +653,45 @@ export function issueSignedTransactionAuthorizationV3(
   const clock = store.getClock();
   const nowSeconds = clock.nowSeconds();
 
-  // 2. Advance/check high-water mark
-  try {
-    store.advanceHighWaterMark(nowSeconds);
-  } catch (err) {
-    if (err instanceof Error && /busy|locked/i.test(err.message)) {
-      return deny("Database is busy; transaction contention retry limit exceeded.");
-    }
-    return deny(err instanceof Error ? err.message : "Clock rollback detected.");
-  }
-
   const db = store.getDatabase();
   if (!beginImmediateWithRetry(db)) {
     return deny("Database is busy; transaction contention retry limit exceeded.");
   }
 
   try {
+    // 2. Validate time against persisted high-water mark inside the write lock
+    const clockRow = db.prepare(
+      "SELECT high_water_seconds FROM system_clock_state WHERE id = 1"
+    ).get() as { high_water_seconds: number } | undefined;
+
+    if (!clockRow) {
+      db.exec("ROLLBACK;");
+      return deny("System clock state is missing or corrupted.");
+    }
+
+    const highWaterSeconds = clockRow.high_water_seconds;
+
+    if (nowSeconds < highWaterSeconds) {
+      const currentNow = clock.nowSeconds();
+      if (currentNow < highWaterSeconds) {
+        db.exec("ROLLBACK;");
+        return deny(
+          `Clock rollback detected: current time (${currentNow}s) precedes persisted high-water mark (${highWaterSeconds}s).`
+        );
+      }
+    }
+
+    const currentNow = clock.nowSeconds();
+    const effectiveNowSeconds = Math.max(currentNow, highWaterSeconds);
+
+    if (effectiveNowSeconds > highWaterSeconds) {
+      db.prepare(`
+        UPDATE system_clock_state
+        SET high_water_seconds = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+      `).run(effectiveNowSeconds);
+    }
+
     // 3. Load authoritative policy and revision from SQLite
     const polRow = db.prepare(
       "SELECT current_revision, status, policy_json FROM policies WHERE policy_id = ?"
@@ -758,11 +759,11 @@ export function issueSignedTransactionAuthorizationV3(
       return deny("Issuer key is not active.");
     }
 
-    if (keyRow.valid_from_seconds !== null && nowSeconds < keyRow.valid_from_seconds) {
+    if (keyRow.valid_from_seconds !== null && effectiveNowSeconds < keyRow.valid_from_seconds) {
       db.exec("ROLLBACK;");
       return deny("Issuer key is not yet valid.");
     }
-    if (keyRow.expires_at_seconds !== null && nowSeconds >= keyRow.expires_at_seconds) {
+    if (keyRow.expires_at_seconds !== null && effectiveNowSeconds >= keyRow.expires_at_seconds) {
       db.exec("ROLLBACK;");
       return deny("Issuer key has expired.");
     }
@@ -794,7 +795,7 @@ export function issueSignedTransactionAuthorizationV3(
       }
     }
 
-    let effectiveExpiresAt = nowSeconds + ttlSeconds;
+    let effectiveExpiresAt = effectiveNowSeconds + ttlSeconds;
     if (authoritativePolicy.expiresAt !== undefined && authoritativePolicy.expiresAt !== null) {
       effectiveExpiresAt = Math.min(effectiveExpiresAt, authoritativePolicy.expiresAt);
     }
@@ -802,7 +803,7 @@ export function issueSignedTransactionAuthorizationV3(
       effectiveExpiresAt = Math.min(effectiveExpiresAt, keyRow.expires_at_seconds);
     }
 
-    if (effectiveExpiresAt <= nowSeconds) {
+    if (effectiveExpiresAt <= effectiveNowSeconds) {
       db.exec("ROLLBACK;");
       return deny("Authorization validity interval is empty: policy or issuer key has already expired.");
     }
@@ -813,7 +814,7 @@ export function issueSignedTransactionAuthorizationV3(
     const prepared = prepareTransactionAuthorization(
       authoritativePolicy,
       requestInput,
-      { nowSeconds },
+      { nowSeconds: effectiveNowSeconds },
     );
 
     if (prepared.decision !== "ALLOW") {
@@ -831,7 +832,7 @@ export function issueSignedTransactionAuthorizationV3(
       version: SIGNED_AUTHORIZATION_ARTIFACT_VERSION_V3,
       authorizationId,
       keyId,
-      issuedAtSeconds: nowSeconds,
+      issuedAtSeconds: effectiveNowSeconds,
       expiresAtSeconds,
       policyId: authoritativePolicy.policyId,
       policyRevision: currentRevision,
@@ -864,7 +865,7 @@ export function issueSignedTransactionAuthorizationV3(
       bindingDigest,
       SIGNED_AUTHORIZATION_ARTIFACT_VERSION_V3,
       keyId,
-      nowSeconds,
+      effectiveNowSeconds,
     );
 
     if (insertRes.changes !== 1) {
@@ -880,7 +881,7 @@ export function issueSignedTransactionAuthorizationV3(
         version: SIGNED_AUTHORIZATION_ARTIFACT_VERSION_V3,
         authorizationId,
         keyId,
-        issuedAtSeconds: nowSeconds,
+        issuedAtSeconds: effectiveNowSeconds,
         expiresAtSeconds,
         policyId: authoritativePolicy.policyId,
         policyRevision: currentRevision,
@@ -928,21 +929,45 @@ export function consumeSignedTransactionAuthorizationV3(
   const clock = store.getClock();
   const nowSeconds = clock.nowSeconds();
 
-  try {
-    store.advanceHighWaterMark(nowSeconds);
-  } catch (err) {
-    if (err instanceof Error && /busy|locked/i.test(err.message)) {
-      return deny("Database is busy; transaction contention retry limit exceeded.");
-    }
-    return deny(err instanceof Error ? err.message : "Clock rollback detected.");
-  }
-
   const db = store.getDatabase();
   if (!beginImmediateWithRetry(db)) {
     return deny("Database is busy; transaction contention retry limit exceeded.");
   }
 
   try {
+    // 2. Validate time against persisted high-water mark inside the write lock
+    const clockRow = db.prepare(
+      "SELECT high_water_seconds FROM system_clock_state WHERE id = 1"
+    ).get() as { high_water_seconds: number } | undefined;
+
+    if (!clockRow) {
+      db.exec("ROLLBACK;");
+      return deny("System clock state is missing or corrupted.");
+    }
+
+    const highWaterSeconds = clockRow.high_water_seconds;
+
+    if (nowSeconds < highWaterSeconds) {
+      const currentNow = clock.nowSeconds();
+      if (currentNow < highWaterSeconds) {
+        db.exec("ROLLBACK;");
+        return deny(
+          `Clock rollback detected: current time (${currentNow}s) precedes persisted high-water mark (${highWaterSeconds}s).`
+        );
+      }
+    }
+
+    const currentNow = clock.nowSeconds();
+    const effectiveNowSeconds = Math.max(currentNow, highWaterSeconds);
+
+    if (effectiveNowSeconds > highWaterSeconds) {
+      db.prepare(`
+        UPDATE system_clock_state
+        SET high_water_seconds = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+      `).run(effectiveNowSeconds);
+    }
+
     // Check in-process duplicate
     if (isObject(envelopeInput) && consumedEnvelopes.has(envelopeInput)) {
       db.exec("ROLLBACK;");
@@ -994,7 +1019,7 @@ export function consumeSignedTransactionAuthorizationV3(
       db.exec("ROLLBACK;");
       return deny("Issuer key had expired at authorization issuance time.");
     }
-    if (keyRow.expires_at_seconds !== null && nowSeconds >= keyRow.expires_at_seconds) {
+    if (keyRow.expires_at_seconds !== null && effectiveNowSeconds >= keyRow.expires_at_seconds) {
       db.exec("ROLLBACK;");
       return deny("Issuer key has expired.");
     }
@@ -1072,8 +1097,8 @@ export function consumeSignedTransactionAuthorizationV3(
     }
 
     // 6. Enforce signed authorization expiry and boundaries
-    // Exact expiry boundary: consumption at nowSeconds >= expiresAtSeconds is DENIED
-    if (nowSeconds >= artifact.expiresAtSeconds) {
+    // Exact expiry boundary: consumption at effectiveNowSeconds >= expiresAtSeconds is DENIED
+    if (effectiveNowSeconds >= artifact.expiresAtSeconds) {
       db.exec("ROLLBACK;");
       return deny("Signed transaction authorization has expired.");
     }
@@ -1095,7 +1120,7 @@ export function consumeSignedTransactionAuthorizationV3(
       authoritativePolicy,
       envelopeInput,
       candidateInput,
-      { nowSeconds },
+      { nowSeconds: effectiveNowSeconds },
     );
 
     if (revalResult.decision !== "ALLOW") {

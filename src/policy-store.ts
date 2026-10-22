@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { type Clock, systemClock } from "./clock.js";
 import { type DemoPolicy, normalizeDemoPolicy } from "./policy.js";
+import { withImmediateTransaction } from "./sqlite-transaction.js";
 
 export type PolicyStatus = "active" | "revoked" | "retired";
 
@@ -69,8 +70,7 @@ export class SQLitePolicyStore implements PolicyStore {
   }
 
   private initializeSchema(): void {
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       // 1. Ensure system_clock_state exists
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS system_clock_state (
@@ -88,14 +88,7 @@ export class SQLitePolicyStore implements PolicyStore {
       // 2. Ensure policies and policy_revisions tables exist with safe migration
       this.ensurePoliciesTable();
       this.ensurePolicyRevisionsTable();
-
-      this.db.exec("COMMIT;");
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    });
   }
 
   private ensurePoliciesTable(): void {
@@ -228,8 +221,7 @@ export class SQLitePolicyStore implements PolicyStore {
       throw new Error(`Initial revision must be a positive safe integer, got ${initialRevision}.`);
     }
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       // 1. Check if policy is currently active or known in policies table
       const existing = this.db.prepare(
         "SELECT policy_id FROM policies WHERE policy_id = ?"
@@ -264,15 +256,9 @@ export class SQLitePolicyStore implements PolicyStore {
         INSERT INTO policy_revisions (policy_id, revision, status, policy_json, created_at)
         VALUES (?, ?, 'active', ?, CURRENT_TIMESTAMP)
       `).run(normalized.policyId, initialRevision, policyJson);
+    });
 
-      this.db.exec("COMMIT;");
-      return this.getPolicy(normalized.policyId)!;
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    return this.getPolicy(normalized.policyId)!;
   }
 
   getPolicy(policyId: string): PolicyRecord | null {
@@ -369,8 +355,7 @@ export class SQLitePolicyStore implements PolicyStore {
       throw new Error("Invalid policy: failed normalization.");
     }
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT policy_id, current_revision, status FROM policies WHERE policy_id = ?"
       ).get(normalized.policyId) as {
@@ -413,15 +398,9 @@ export class SQLitePolicyStore implements PolicyStore {
         INSERT INTO policy_revisions (policy_id, revision, status, policy_json, created_at)
         VALUES (?, ?, 'active', ?, CURRENT_TIMESTAMP)
       `).run(normalized.policyId, newRevision, policyJson);
+    });
 
-      this.db.exec("COMMIT;");
-      return this.getPolicy(normalized.policyId)!;
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    return this.getPolicy(normalized.policyId)!;
   }
 
   revokePolicy(policyId: string, expectedCurrentRevision?: number): PolicyRecord {
@@ -429,8 +408,7 @@ export class SQLitePolicyStore implements PolicyStore {
       throw new Error("Policy ID must be a non-empty string.");
     }
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT policy_id, current_revision, status, policy_json FROM policies WHERE policy_id = ?"
       ).get(policyId) as {
@@ -455,9 +433,7 @@ export class SQLitePolicyStore implements PolicyStore {
       }
 
       if (row.status === "revoked") {
-        // Already revoked
-        this.db.exec("COMMIT;");
-        return this.getPolicy(policyId)!;
+        return;
       }
 
       const newRevision = row.current_revision + 1;
@@ -475,15 +451,9 @@ export class SQLitePolicyStore implements PolicyStore {
         INSERT INTO policy_revisions (policy_id, revision, status, policy_json, created_at)
         VALUES (?, ?, 'revoked', ?, CURRENT_TIMESTAMP)
       `).run(policyId, newRevision, policyJson);
+    });
 
-      this.db.exec("COMMIT;");
-      return this.getPolicy(policyId)!;
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    return this.getPolicy(policyId)!;
   }
 
   restorePolicy(
@@ -495,8 +465,7 @@ export class SQLitePolicyStore implements PolicyStore {
       throw new Error("Policy ID must be a non-empty string.");
     }
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT policy_id, current_revision, status, policy_json FROM policies WHERE policy_id = ?"
       ).get(policyId) as {
@@ -554,15 +523,9 @@ export class SQLitePolicyStore implements PolicyStore {
         INSERT INTO policy_revisions (policy_id, revision, status, policy_json, created_at)
         VALUES (?, ?, 'active', ?, CURRENT_TIMESTAMP)
       `).run(policyId, newRevision, policyJson);
+    });
 
-      this.db.exec("COMMIT;");
-      return this.getPolicy(policyId)!;
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    return this.getPolicy(policyId)!;
   }
 
   retirePolicy(policyId: string, expectedCurrentRevision?: number): PolicyRecord {
@@ -570,8 +533,7 @@ export class SQLitePolicyStore implements PolicyStore {
       throw new Error("Policy ID must be a non-empty string.");
     }
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT policy_id, current_revision, status, policy_json FROM policies WHERE policy_id = ?"
       ).get(policyId) as {
@@ -592,8 +554,7 @@ export class SQLitePolicyStore implements PolicyStore {
       }
 
       if (row.status === "retired") {
-        this.db.exec("COMMIT;");
-        return this.getPolicy(policyId)!;
+        return;
       }
 
       const newRevision = row.current_revision + 1;
@@ -610,15 +571,9 @@ export class SQLitePolicyStore implements PolicyStore {
         INSERT INTO policy_revisions (policy_id, revision, status, policy_json, created_at)
         VALUES (?, ?, 'retired', ?, CURRENT_TIMESTAMP)
       `).run(policyId, newRevision, policyJson);
+    });
 
-      this.db.exec("COMMIT;");
-      return this.getPolicy(policyId)!;
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    return this.getPolicy(policyId)!;
   }
 
   deletePolicy(policyId: string, expectedCurrentRevision?: number): boolean {
@@ -626,15 +581,15 @@ export class SQLitePolicyStore implements PolicyStore {
       throw new Error("Policy ID must be a non-empty string.");
     }
 
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    let deleted = false;
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT policy_id, current_revision FROM policies WHERE policy_id = ?"
       ).get(policyId) as { policy_id: string; current_revision: number } | undefined;
 
       if (!row) {
-        this.db.exec("COMMIT;");
-        return false;
+        deleted = false;
+        return;
       }
 
       if (expectedCurrentRevision !== undefined && row.current_revision !== expectedCurrentRevision) {
@@ -644,14 +599,10 @@ export class SQLitePolicyStore implements PolicyStore {
       }
 
       this.db.prepare("DELETE FROM policies WHERE policy_id = ?").run(policyId);
-      this.db.exec("COMMIT;");
-      return true;
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+      deleted = true;
+    });
+
+    return deleted;
   }
 
   recreatePolicy(policy: DemoPolicy, newRevision?: number): PolicyRecord {

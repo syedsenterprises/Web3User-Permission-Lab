@@ -2,9 +2,22 @@ import { DatabaseSync } from "node:sqlite";
 import { type Clock, systemClock } from "./clock.js";
 import { SQLiteKeyStore } from "./key-store.js";
 import { SQLitePolicyStore } from "./policy-store.js";
+import { withImmediateTransaction } from "./sqlite-transaction.js";
 
 export * from "./policy-store.js";
 export * from "./key-store.js";
+export * from "./sqlite-transaction.js";
+
+export interface SQLiteAuthorizationStoreOptions {
+  readonly clock?: Clock;
+  /**
+   * When true (default), allows legacy V1 (bound) and V2 (signed) operations.
+   * When false, calling legacy reservation, V1 issuance/consumption, or V2 issuance/consumption
+   * immediately fails closed, guaranteeing that only strict V3 governed authorizations
+   * can be issued or consumed in the database.
+   */
+  readonly allowLegacyArtifactVersions?: boolean;
+}
 
 /**
  * Contract required by the persistent consumption boundary: `reserve` must
@@ -51,9 +64,27 @@ export interface BoundAuthorizationIdStore extends AuthorizationIdStore {
 export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
   private readonly db: DatabaseSync;
   private readonly clock: Clock;
+  private readonly allowLegacyArtifactVersions: boolean;
 
-  constructor(databasePath: string, clock: Clock = systemClock) {
-    this.clock = clock;
+  constructor(
+    databasePath: string,
+    clockOrOptions: Clock | SQLiteAuthorizationStoreOptions = systemClock,
+    options?: SQLiteAuthorizationStoreOptions,
+  ) {
+    if (options && typeof options === "object") {
+      this.clock = clockOrOptions && "nowSeconds" in clockOrOptions ? clockOrOptions : (options.clock ?? systemClock);
+      this.allowLegacyArtifactVersions = options.allowLegacyArtifactVersions ?? true;
+    } else if (clockOrOptions && "nowSeconds" in clockOrOptions) {
+      this.clock = clockOrOptions;
+      this.allowLegacyArtifactVersions = true;
+    } else if (clockOrOptions && typeof clockOrOptions === "object") {
+      this.clock = clockOrOptions.clock ?? systemClock;
+      this.allowLegacyArtifactVersions = clockOrOptions.allowLegacyArtifactVersions ?? true;
+    } else {
+      this.clock = systemClock;
+      this.allowLegacyArtifactVersions = true;
+    }
+
     this.db = new DatabaseSync(databasePath);
 
     try {
@@ -73,9 +104,12 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     }
   }
 
+  isLegacyAllowed(): boolean {
+    return this.allowLegacyArtifactVersions;
+  }
+
   private initializeSchema(): void {
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
+    withImmediateTransaction(this.db, () => {
       // 1. Recover from interrupted migration if applicable.
       // If consumed_authorization_ids_v3 exists but consumed_authorization_ids does NOT,
       // consumed_authorization_ids_v3 contains the only surviving copy of data.
@@ -220,14 +254,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
         VALUES (1, ?)
         ON CONFLICT(id) DO NOTHING;
       `).run(this.clock.nowSeconds());
-
-      this.db.exec("COMMIT;");
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    });
   }
 
   private resolveMultiTableAmbiguity(): void {
@@ -447,22 +474,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
       throw new Error("Evaluation timestamp must be a non-negative safe integer.");
     }
 
-    let attempt = 0;
-    while (attempt < 3) {
-      attempt++;
-      try {
-        this.db.exec("BEGIN IMMEDIATE;");
-        break;
-      } catch (err) {
-        if (err instanceof Error && /busy|locked/i.test(err.message) && attempt < 3) {
-          const start = Date.now();
-          while (Date.now() - start < 25) {}
-          continue;
-        }
-        throw new Error("Database is busy; transaction contention retry limit exceeded.");
-      }
-    }
-    try {
+    withImmediateTransaction(this.db, () => {
       const row = this.db.prepare(
         "SELECT high_water_seconds FROM system_clock_state WHERE id = 1",
       ).get() as { high_water_seconds: number } | undefined;
@@ -471,12 +483,10 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
         this.db.prepare(
           "INSERT INTO system_clock_state (id, high_water_seconds) VALUES (1, ?)",
         ).run(nowSeconds);
-        this.db.exec("COMMIT;");
         return;
       }
 
       if (nowSeconds < row.high_water_seconds) {
-        this.db.exec("ROLLBACK;");
         throw new Error(
           `Clock rollback detected: current time (${nowSeconds}s) precedes persisted high-water mark (${row.high_water_seconds}s).`,
         );
@@ -489,14 +499,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
           WHERE id = 1 AND high_water_seconds < ?
         `).run(nowSeconds, nowSeconds);
       }
-
-      this.db.exec("COMMIT;");
-    } catch (err) {
-      try {
-        this.db.exec("ROLLBACK;");
-      } catch {}
-      throw err;
-    }
+    });
   }
 
   getHighWaterMark(): number | null {
@@ -515,6 +518,10 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
    * Legacy reservations are classified as artifact_version = 1.
    */
   reserve(authorizationId: string): boolean {
+    if (!this.allowLegacyArtifactVersions) {
+      throw new Error("Legacy authorization artifact versions are disabled by configuration.");
+    }
+
     const result = this.db.prepare(`
       INSERT INTO consumed_authorization_ids (authorization_id, state, consumed_at, artifact_version)
       VALUES (?, 'consumed', CURRENT_TIMESTAMP, 1)
@@ -536,6 +543,10 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     keyId?: string,
     issuedAtSeconds?: number,
   ): boolean {
+    if (version !== 3 && !this.allowLegacyArtifactVersions) {
+      throw new Error("Legacy authorization artifact versions are disabled by configuration.");
+    }
+
     const result = this.db.prepare(`
       INSERT INTO consumed_authorization_ids (
         authorization_id, binding_digest, state, consumed_at, artifact_version, key_id, issued_at_seconds
@@ -564,6 +575,9 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     keyId?: string,
     issuedAtSeconds?: number,
   ): boolean {
+    if (version !== 3 && !this.allowLegacyArtifactVersions) {
+      throw new Error("Legacy authorization artifact versions are disabled by configuration.");
+    }
     if (keyId !== undefined && issuedAtSeconds !== undefined) {
       const result = this.db.prepare(`
         UPDATE consumed_authorization_ids
