@@ -95,7 +95,10 @@ if (issueResult.decision === "ALLOW") {
   });
 
   if (consumeResult.decision === "ALLOW") {
-    console.log("Authorization granted. Safe to broadcast transaction.");
+    // Note: ALLOW confirms policy compliance and marks the authorization consumed
+    // in SQLite. The external caller / relayer remains responsible for signing the
+    // EVM transaction with an Ethereum wallet key (secp256k1) and broadcasting to an RPC node.
+    console.log("Authorization granted off-chain. Ready for wallet signing and RPC broadcast.");
   }
 
   // 6. Any duplicate consumption attempt is strictly denied
@@ -113,7 +116,7 @@ engine.close();
 ### Decision Semantics
 
 The engine strictly returns one of three decisions:
-- **`ALLOW`**: The transaction request satisfies authoritative policy rules, signing key validity intervals, and timestamp guardrails. A persistent single-use reservation was recorded atomically in SQLite.
+- **`ALLOW`**: The transaction request satisfies authoritative policy rules, signing key validity intervals, and timestamp guardrails. A persistent single-use reservation was recorded atomically in SQLite. This represents an off-chain authorization outcome, not an on-chain execution or transaction broadcast.
 - **`DENY`**: The request violates policy bounds (e.g. transfer limit exceeded, disallowed target/selector), references a revoked/retired key or policy, has expired, or has already been consumed (replay attack).
 - **`UNKNOWN`**: The candidate calldata or request structure is malformed or cannot be safely parsed into a valid transaction envelope.
 
@@ -127,19 +130,30 @@ The engine strictly returns one of three decisions:
   - `ClockGuardError`: Clock rollback, forward drift exceeding safety bounds, or startup forward gap violation.
   - `StoreTaintedError`: The database connection was quarantined due to an uncertain `COMMIT;` outcome or unrecoverable disk error. **Never automatically retry an operation when a store is tainted.**
 
-### SQLite Durability, Checkpointing & Hardware Limitations
+### SQLite Durability, Checkpointing & Storage Boundaries
 
+- **Local Storage Requirement**: SQLite WAL mode requires shared memory (`-shm`) and POSIX byte-range file locking. Network filesystems (such as NFS, SMB/CIFS, AWS EFS, or Azure Files) do not reliably implement these primitives and can cause silent corruption, locking deadlocks, or `SQLITE_BUSY` errors. The database must reside on direct, locally attached block storage (e.g. local NVMe/SSD or dedicated cloud block storage like AWS EBS / GCP Persistent Disk mounted locally).
 - **WAL & Synchronous FULL**: Every owned connection configures `PRAGMA journal_mode = WAL;` and `PRAGMA synchronous = FULL;` by default.
-- **Checkpointing**: Call `engine.storage.checkpoint("TRUNCATE")` to safely checkpoint and truncate write-ahead log frames when concurrent readers are inactive.
-- **Durability Model**:
-  1. *Process Crash*: Protected by WAL atomic commits and transaction rollback.
-  2. *OS Crash / Kernel Panic*: Protected by `synchronous = FULL` forcing `fsync` on every commit.
-  3. *Power Loss Limitation*: Storage controllers with volatile write caches without battery/capacitor Power Loss Protection (PLP) may acknowledge writes before non-volatile NAND persistence. Physical power-loss durability requires enterprise host storage controllers with hardware PLP.
+- **Checkpointing & WAL Management**:
+  - The SDK exposes `engine.storage.checkpoint(mode?: CheckpointMode): CheckpointResult`.
+  - Supported modes: `"PASSIVE"` (default), `"FULL"`, `"RESTART"`, and `"TRUNCATE"`.
+  - Return structure: `{ busy: boolean, logFrames: number, checkpointedFrames: number }`.
+  - Checkpointing transfers write-ahead log frames back into the main database file.
+  - Active or long-running read transactions hold shared locks on earlier WAL frames, preventing them from being checkpointed or truncated, which causes `result.busy` to be `true`.
+  - **Operational practice**: Avoid calling `checkpoint("TRUNCATE")` unconditionally on latency-sensitive request paths. Run checkpointing as a periodic background maintenance task or during low-concurrency intervals, and always inspect `result.busy` to verify whether the log was fully truncated.
+- **Durability Model & Hardware Recommendations**:
+  1. *Process Crash*: Protected by WAL atomic commits and automatic rollback upon database reopen.
+  2. *OS Crash / Kernel Panic*: Protected by `synchronous = FULL` issuing OS-level flush requests (`fsync` / `FlushFileBuffers`) on every commit.
+  3. *Power Loss Durability*: Disk controllers with volatile write caches may acknowledge writes before data is permanently committed to non-volatile NAND cells. For mission-critical deployments requiring physical power-loss durability, enterprise host storage controllers with hardware Power Loss Protection (PLP) capacitors are recommended.
 
 ### Security Boundary & Private Key Hygiene
 
 - **Off-Chain Scope**: Web3User is an off-chain decision engine. It does not sign Ethereum transactions, connect to RPC nodes, or broadcast to mempools.
+- **Dual-Key Architecture (Issuer Ed25519 vs. Wallet secp256k1)**:
+  - *Issuer Keys (Ed25519)*: Managed within the SDK (`SQLiteKeyStore`) to sign and verify off-chain V3 authorization artifacts.
+  - *Wallet Keys (secp256k1)*: Ethereum private keys used on-chain to sign EVM transactions. The Web3User SDK never handles, stores, or accesses wallet private keys.
 - **Private Key Safety**: Never hardcode private keys in source code. Load private keys from secure environment variables, KMS, or HSMs. The SDK never logs, serializes, or echoes private key material in error messages.
+- **NTP Time Synchronization Target**: To minimize clock-rollback detections across multi-process workers sharing a database, host servers should synchronize via NTP (e.g., `chrony` or `systemd-timesyncd`). Maintaining host clock drift within an operational target of ~100ms is recommended.
 - **Privileged Store Access**: `engine.getStore()` is provided strictly for administrative maintenance and diagnostics. Executing raw SQL directly on the underlying connection bypasses engine validations and ClockGuard safeguards.
 
 ## Persistent replay demonstration
