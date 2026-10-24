@@ -84,7 +84,8 @@ describe("Milestone 6.13-B: SDK Packaging & Consumer Integration", () => {
           stdio: "pipe",
         });
 
-        const tarballPath = join(tempBase, "web3user-permission-lab-0.1.0.tgz");
+        const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+        const tarballPath = join(tempBase, `web3user-permission-lab-${pkg.version}.tgz`);
         expect(existsSync(tarballPath)).toBe(true);
 
         // 2. Setup external consumer fixture
@@ -268,7 +269,8 @@ run();
           stdio: "pipe",
         });
 
-        const tarballPath = join(tempBase, "web3user-permission-lab-0.1.0.tgz");
+        const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+        const tarballPath = join(tempBase, `web3user-permission-lab-${pkg.version}.tgz`);
         expect(existsSync(tarballPath)).toBe(true);
 
         // 2. Setup external consumer fixture
