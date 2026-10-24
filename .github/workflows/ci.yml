@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   test:
-    name: Node ${{ matrix.node-version }} on ubuntu-latest
-    runs-on: ubuntu-latest
+    name: Node ${{ matrix.node-version }} on ubuntu-24.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -20,10 +20,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: "npm"
