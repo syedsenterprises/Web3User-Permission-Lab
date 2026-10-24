@@ -334,4 +334,197 @@ describe("Milestone 6.2 Phase 2: SQLiteKeyStore Governance", () => {
       store.close();
     }
   });
+
+  // 17. Milestone 6.5: Failed key registration rolls back clock high-water mark atomically
+  it("rolls back high-water mark advancement when registerKey fails", () => {
+    const dbFile = databasePath("atomic-register-clock.sqlite");
+    const clock = new TestClock(1000);
+    const store = new SQLiteKeyStore(dbFile, clock);
+    const keyPair1 = createEd25519Keys();
+    const keyPair2 = createEd25519Keys();
+
+    try {
+      // 1. Initial valid registration at t=1000 establishes high-water mark = 1000
+      store.registerKey({
+        keyId: "issuer-key-orig",
+        publicKey: keyPair1.publicKey,
+        status: "active",
+      });
+      expect(store.getHighWaterMark()).toBe(1000);
+
+      // 2. Advance clock to future timestamp t=9000 and attempt duplicate key ID with different PEM
+      clock.set(9000);
+      expect(() => {
+        store.registerKey({
+          keyId: "issuer-key-orig",
+          publicKey: keyPair2.publicKey,
+          status: "active",
+        });
+      }).toThrow("is already registered with a different public key.");
+
+      // CRITICAL INVARIANT: Failed mutation MUST NOT leave clock high-water mark at 9000
+      expect(store.getHighWaterMark()).toBe(1000);
+
+      // 3. Database remains usable and subsequent valid operation at t=2000 succeeds
+      clock.set(2000);
+      store.registerKey({
+        keyId: "issuer-key-second",
+        publicKey: keyPair2.publicKey,
+        status: "active",
+      });
+      expect(store.getHighWaterMark()).toBe(2000);
+      expect(store.getKey("issuer-key-second")).not.toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  // 18. Milestone 6.5: Failed retireKey and revokeKey roll back clock high-water mark atomically
+  it("rolls back high-water mark advancement when retireKey or revokeKey fails", () => {
+    const dbFile = databasePath("atomic-retire-revoke-clock.sqlite");
+    const clock = new TestClock(1000);
+    const store = new SQLiteKeyStore(dbFile, clock);
+    const { publicKey } = createEd25519Keys();
+
+    try {
+      store.registerKey({
+        keyId: "key-target",
+        publicKey,
+        status: "active",
+      });
+      expect(store.getHighWaterMark()).toBe(1000);
+
+      // Attempt to retire non-existent key with future timestamp 8000
+      expect(() => {
+        store.retireKey("non-existent-key", 8000);
+      }).toThrow("Key 'non-existent-key' not found.");
+
+      // High-water mark must remain at 1000, NOT advanced to 8000
+      expect(store.getHighWaterMark()).toBe(1000);
+
+      // Attempt to revoke non-existent key with future timestamp 9000
+      expect(() => {
+        store.revokeKey("non-existent-key", 9000);
+      }).toThrow("Key 'non-existent-key' not found.");
+
+      // High-water mark must remain at 1000, NOT advanced to 9000
+      expect(store.getHighWaterMark()).toBe(1000);
+
+      // Subsequent valid retirement at t=1500 succeeds
+      const retired = store.retireKey("key-target", 1500);
+      expect(retired.status).toBe("retired");
+      expect(store.getHighWaterMark()).toBe(1500);
+    } finally {
+      store.close();
+    }
+  });
+
+  // 19. Milestone 6.11 Stage A: Standalone SQLiteKeyStore default ClockGuard enforcement
+  it("enforces ClockGuard protections on standalone SQLiteKeyStore when constructed without an explicit guard", () => {
+    const dbFile = databasePath("standalone-key-clockguard.sqlite");
+    const clock = new TestClock(1000);
+    const store = new SQLiteKeyStore(dbFile, clock);
+    const { publicKey } = createEd25519Keys();
+
+    try {
+      expect(store.getClockGuard()).toBeDefined();
+      expect(store.getClockGuard().getState()).toBe("UNINITIALIZED");
+
+      // Initial mutation activates ClockGuard
+      store.registerKey({
+        keyId: "standalone-key-1",
+        publicKey,
+        status: "active",
+      });
+
+      expect(store.getClockGuard().getState()).toBe("ACTIVE");
+      expect(store.getHighWaterMark()).toBe(1000);
+
+      // Advance wall clock abruptly without monotonic advance (+50s step divergence > 10s ceiling)
+      clock.advanceWallSeconds(50);
+
+      expect(() => {
+        store.retireKey("standalone-key-1", 1050);
+      }).toThrow(
+        "Suspicious forward clock jump detected: step velocity divergence of 50s exceeds forward limit (10s)."
+      );
+
+      // Guard is tripped closed
+      expect(store.getClockGuard().getState()).toBe("TRIPPED_CLOSED");
+
+      // Subsequent mutations fail closed immediately
+      expect(() => {
+        store.getKey("standalone-key-1");
+      }).not.toThrow(); // read-only is allowed if untainted
+      expect(() => {
+        store.revokeKey("standalone-key-1", 1050);
+      }).toThrow("Store clock monitor is in a tripped state");
+
+      // High-water mark remains untampered at 1000
+      expect(store.getHighWaterMark()).toBe(1000);
+    } finally {
+      store.close();
+    }
+  });
+
+  // 20. Milestone 6.11 Stage A: Standalone SQLiteKeyStore startup forward-gap enforcement
+  it("enforces startup forward-gap validation on standalone SQLiteKeyStore against existing databases", () => {
+    const dbFile = databasePath("standalone-key-startup-gap.sqlite");
+    const clock = new TestClock(1000);
+    const initStore = new SQLiteKeyStore(dbFile, clock);
+    const { publicKey } = createEd25519Keys();
+    try {
+      initStore.registerKey({
+        keyId: "gap-key-target",
+        publicKey,
+        status: "active",
+      });
+    } finally {
+      initStore.close();
+    }
+
+    // Reopen with clock jumping forward by 4000s (> 3600s maxStartupForwardGapSeconds)
+    const forwardClock = new TestClock(5000);
+    expect(() => {
+      new SQLiteKeyStore(dbFile, forwardClock);
+    }).toThrow(
+      "Store startup rejected: forward clock gap of 4000 seconds exceeds maximum allowed startup threshold (3600s)."
+    );
+
+    // Reopen with configured gap threshold accommodates the forward gap
+    const allowedStore = new SQLiteKeyStore(dbFile, {
+      clock: forwardClock,
+      maxStartupForwardGapSeconds: 5000,
+    });
+    try {
+      expect(allowedStore.getKey("gap-key-target")?.keyId).toBe("gap-key-target");
+    } finally {
+      allowedStore.close();
+    }
+  });
+
+  // 21. Milestone 6.11 Stage B: Standalone SQLiteKeyStore durability configuration
+  it("configures PRAGMA journal_mode = WAL and synchronous = FULL by default on standalone SQLiteKeyStore", () => {
+    const dbFile = databasePath("standalone-key-durability.sqlite");
+    const clock = new TestClock(1000);
+    const store = new SQLiteKeyStore(dbFile, clock);
+
+    try {
+      expect(store.getJournalMode()).toBe("wal");
+      expect(store.getSynchronousMode()).toBe("FULL");
+    } finally {
+      store.close();
+    }
+
+    // Explicit NORMAL configuration
+    const normalStore = new SQLiteKeyStore(dbFile, {
+      clock,
+      synchronous: "NORMAL",
+    });
+    try {
+      expect(normalStore.getSynchronousMode()).toBe("NORMAL");
+    } finally {
+      normalStore.close();
+    }
+  });
 });

@@ -75,7 +75,9 @@ function runSingleDemo(targetDbPath: string): { decision: string; lines: string[
   let finalDecision = "UNKNOWN";
 
   try {
-    store = new SQLiteAuthorizationStore(targetDbPath);
+    store = new SQLiteAuthorizationStore(targetDbPath, undefined, {
+      allowLegacyArtifactVersions: true,
+    });
     const prepared = prepareTransactionAuthorization(
       policy,
       request,

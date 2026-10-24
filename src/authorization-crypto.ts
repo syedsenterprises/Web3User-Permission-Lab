@@ -8,6 +8,7 @@ import {
 } from "node:crypto";
 
 export const SIGNED_AUTHORIZATION_ARTIFACT_VERSION = 2 as const;
+export const MAX_AUTHORIZATION_ID_LENGTH = 128;
 
 export interface SignedAuthorizationArtifact {
   readonly version: typeof SIGNED_AUTHORIZATION_ARTIFACT_VERSION;
@@ -35,6 +36,9 @@ export function canonicalSignedPayload(
   keyId: string,
   bindingDigest: string,
 ): string {
+  if (authorizationId.length > MAX_AUTHORIZATION_ID_LENGTH) {
+    throw new Error(`Invalid parameters for canonicalSignedPayload: authorizationId exceeds maximum length of ${MAX_AUTHORIZATION_ID_LENGTH} characters.`);
+  }
   return [
     "web3user-signed-authorization-v2\n",
     encodeField("artifact.version", String(version)),
@@ -153,6 +157,7 @@ export function isSignedAuthorizationArtifact(
     typeof artifact.authorizationId === "string" &&
     artifact.authorizationId.trim().length > 0 &&
     artifact.authorizationId === artifact.authorizationId.trim() &&
+    artifact.authorizationId.length <= MAX_AUTHORIZATION_ID_LENGTH &&
     typeof artifact.keyId === "string" &&
     artifact.keyId.trim().length > 0 &&
     artifact.keyId === artifact.keyId.trim() &&
@@ -197,9 +202,11 @@ export function canonicalSignedPayloadV3(params: {
     typeof params.authorizationId !== "string" ||
     params.authorizationId.trim().length === 0 ||
     params.authorizationId !== params.authorizationId.trim() ||
+    params.authorizationId.length > MAX_AUTHORIZATION_ID_LENGTH ||
     typeof params.keyId !== "string" ||
     params.keyId.trim().length === 0 ||
     params.keyId !== params.keyId.trim() ||
+    params.keyId.length > 128 ||
     !Number.isSafeInteger(params.issuedAtSeconds) ||
     params.issuedAtSeconds < 0 ||
     !Number.isSafeInteger(params.expiresAtSeconds) ||
@@ -244,9 +251,11 @@ export function isSignedAuthorizationArtifactV3(
     typeof artifact.authorizationId === "string" &&
     artifact.authorizationId.trim().length > 0 &&
     artifact.authorizationId === artifact.authorizationId.trim() &&
+    artifact.authorizationId.length <= MAX_AUTHORIZATION_ID_LENGTH &&
     typeof artifact.keyId === "string" &&
     artifact.keyId.trim().length > 0 &&
     artifact.keyId === artifact.keyId.trim() &&
+    artifact.keyId.length <= 128 &&
     typeof artifact.issuedAtSeconds === "number" &&
     Number.isSafeInteger(artifact.issuedAtSeconds) &&
     artifact.issuedAtSeconds >= 0 &&

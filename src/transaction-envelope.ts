@@ -32,6 +32,7 @@ export type EnvelopeResult =
   | { ok: false; reason: string };
 
 const ADDRESS = /^0x[a-fA-F0-9]{40}$/;
+export const MAX_CALLDATA_HEX_LENGTH = 131074; // 0x + 64KB (131072 hex characters)
 const HEX_DATA = /^0x(?:[a-fA-F0-9]{2})*$/;
 const UINT = /^(0|[1-9][0-9]*)$/;
 const MAX_UINT256 = (1n << 256n) - 1n;
@@ -109,7 +110,21 @@ export function createTransactionEnvelope(
     return { ok: false, reason: "Target address is invalid." };
   }
 
-  if (typeof calldata !== "string" || !HEX_DATA.test(calldata)) {
+  if (typeof calldata !== "string") {
+    return {
+      ok: false,
+      reason: "Calldata must be 0x-prefixed, even-length hexadecimal data.",
+    };
+  }
+
+  if (calldata.length > MAX_CALLDATA_HEX_LENGTH) {
+    return {
+      ok: false,
+      reason: `Calldata exceeds maximum allowed length of ${MAX_CALLDATA_HEX_LENGTH} characters.`,
+    };
+  }
+
+  if (!HEX_DATA.test(calldata)) {
     return {
       ok: false,
       reason: "Calldata must be 0x-prefixed, even-length hexadecimal data.",

@@ -1,22 +1,44 @@
 import { DatabaseSync } from "node:sqlite";
-import { type Clock, systemClock } from "./clock.js";
+import {
+  type Clock,
+  systemClock,
+  ClockGuard,
+  type MonotonicClock,
+  type ClockCandidate,
+  TestClock,
+} from "./clock.js";
 import { SQLiteKeyStore } from "./key-store.js";
 import { SQLitePolicyStore } from "./policy-store.js";
-import { withImmediateTransaction } from "./sqlite-transaction.js";
+import { isFatalIOError, withImmediateTransaction } from "./sqlite-transaction.js";
 
 export * from "./policy-store.js";
 export * from "./key-store.js";
 export * from "./sqlite-transaction.js";
 
+export type SQLiteSynchronousMode = "OFF" | "NORMAL" | "FULL" | "EXTRA";
+export type CheckpointMode = "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE";
+
+export interface CheckpointResult {
+  readonly busy: boolean;
+  readonly logFrames: number;
+  readonly checkpointedFrames: number;
+}
+
 export interface SQLiteAuthorizationStoreOptions {
   readonly clock?: Clock;
   /**
-   * When true (default), allows legacy V1 (bound) and V2 (signed) operations.
-   * When false, calling legacy reservation, V1 issuance/consumption, or V2 issuance/consumption
+   * When true, allows legacy V1 (bound) and V2 (signed) operations.
+   * When false (default), calling legacy reservation, V1 issuance/consumption, or V2 issuance/consumption
    * immediately fails closed, guaranteeing that only strict V3 governed authorizations
    * can be issued or consumed in the database.
    */
   readonly allowLegacyArtifactVersions?: boolean;
+  readonly monotonicClock?: MonotonicClock;
+  readonly clockGuard?: ClockGuard;
+  readonly maxStartupForwardGapSeconds?: number;
+  readonly synchronous?: SQLiteSynchronousMode;
+  readonly onFatalTaint?: (reason: string) => void;
+  readonly busyTimeoutMs?: number;
 }
 
 /**
@@ -53,6 +75,21 @@ export interface BoundAuthorizationIdStore extends AuthorizationIdStore {
     keyId?: string,
     issuedAtSeconds?: number,
   ): boolean;
+  cancelAuthorization?(
+    authorizationId: string,
+  ): boolean;
+}
+
+export type AuthorizationState = "issued" | "consumed" | "legacy_void" | "cancelled";
+
+export interface AuthorizationRecord {
+  readonly authorizationId: string;
+  readonly bindingDigest: string | null;
+  readonly state: AuthorizationState;
+  readonly consumedAt: string | null;
+  readonly artifactVersion: number;
+  readonly keyId: string | null;
+  readonly issuedAtSeconds: number | null;
 }
 
 /**
@@ -65,25 +102,60 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
   private readonly db: DatabaseSync;
   private readonly clock: Clock;
   private readonly allowLegacyArtifactVersions: boolean;
+  private readonly clockGuard: ClockGuard;
+  private tainted: boolean = false;
+  private taintedReason: string | undefined;
+  private readonly onFatalTaint?: (reason: string) => void;
 
   constructor(
     databasePath: string,
     clockOrOptions: Clock | SQLiteAuthorizationStoreOptions = systemClock,
     options?: SQLiteAuthorizationStoreOptions,
   ) {
+    let resolvedClock: Clock = systemClock;
+    let resolvedLegacy = false;
+    let resolvedMonotonic: MonotonicClock | undefined;
+    let resolvedGuard: ClockGuard | undefined;
+    let resolvedGap: number | undefined;
+    let resolvedSynchronous: SQLiteSynchronousMode = "FULL";
+    let resolvedFatalTaint: ((reason: string) => void) | undefined;
+    let resolvedBusyTimeout: number | undefined;
+
     if (options && typeof options === "object") {
-      this.clock = clockOrOptions && "nowSeconds" in clockOrOptions ? clockOrOptions : (options.clock ?? systemClock);
-      this.allowLegacyArtifactVersions = options.allowLegacyArtifactVersions ?? true;
+      resolvedClock =
+        clockOrOptions && "nowSeconds" in clockOrOptions
+          ? clockOrOptions
+          : (options.clock ?? systemClock);
+      resolvedLegacy = options.allowLegacyArtifactVersions ?? false;
+      resolvedMonotonic = options.monotonicClock;
+      resolvedGuard = options.clockGuard;
+      resolvedGap = options.maxStartupForwardGapSeconds;
+      resolvedSynchronous = options.synchronous ?? "FULL";
+      resolvedFatalTaint = options.onFatalTaint;
+      resolvedBusyTimeout = options.busyTimeoutMs;
     } else if (clockOrOptions && "nowSeconds" in clockOrOptions) {
-      this.clock = clockOrOptions;
-      this.allowLegacyArtifactVersions = true;
+      resolvedClock = clockOrOptions;
+      resolvedLegacy = false;
     } else if (clockOrOptions && typeof clockOrOptions === "object") {
-      this.clock = clockOrOptions.clock ?? systemClock;
-      this.allowLegacyArtifactVersions = clockOrOptions.allowLegacyArtifactVersions ?? true;
-    } else {
-      this.clock = systemClock;
-      this.allowLegacyArtifactVersions = true;
+      resolvedClock = clockOrOptions.clock ?? systemClock;
+      resolvedLegacy = clockOrOptions.allowLegacyArtifactVersions ?? false;
+      resolvedMonotonic = clockOrOptions.monotonicClock;
+      resolvedGuard = clockOrOptions.clockGuard;
+      resolvedGap = clockOrOptions.maxStartupForwardGapSeconds;
+      resolvedSynchronous = clockOrOptions.synchronous ?? "FULL";
+      resolvedFatalTaint = clockOrOptions.onFatalTaint;
+      resolvedBusyTimeout = clockOrOptions.busyTimeoutMs;
     }
+
+    this.clock = resolvedClock;
+    this.allowLegacyArtifactVersions = resolvedLegacy;
+    this.onFatalTaint = resolvedFatalTaint;
+
+    this.clockGuard =
+      resolvedGuard ??
+      new ClockGuard(this.clock, resolvedMonotonic, {
+        maxStartupForwardGapSeconds: resolvedGap,
+      });
 
     this.db = new DatabaseSync(databasePath);
 
@@ -92,7 +164,21 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     } catch {
       // Ignored for in-memory or unsupported database configurations
     }
-    this.db.exec("PRAGMA busy_timeout = 5000;");
+    const syncMode = ["OFF", "NORMAL", "FULL", "EXTRA"].includes(resolvedSynchronous)
+      ? resolvedSynchronous
+      : "FULL";
+    try {
+      this.db.exec(`PRAGMA synchronous = ${syncMode};`);
+    } catch {
+      // Ignored for in-memory or unsupported database configurations
+    }
+    const busyTimeout =
+      typeof resolvedBusyTimeout === "number" &&
+      Number.isFinite(resolvedBusyTimeout) &&
+      resolvedBusyTimeout >= 0
+        ? Math.floor(resolvedBusyTimeout)
+        : 5000;
+    this.db.exec(`PRAGMA busy_timeout = ${busyTimeout};`);
 
     try {
       this.initializeSchema();
@@ -104,7 +190,48 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     }
   }
 
+  isTainted(): boolean {
+    return this.tainted || this.clockGuard.isTainted();
+  }
+
+  getTaintedReason(): string | undefined {
+    return this.taintedReason ?? this.clockGuard.getTaintedReason();
+  }
+
+  markTainted(reason: string): void {
+    if (this.tainted) {
+      return;
+    }
+    this.tainted = true;
+    this.taintedReason = reason;
+    this.clockGuard.taintConnection(reason);
+    try {
+      this.db.close();
+    } catch {}
+    if (this.onFatalTaint) {
+      try {
+        this.onFatalTaint(reason);
+      } catch {}
+    }
+  }
+
+  private handleFatalIO(err: unknown): void {
+    if (isFatalIOError(err) && !this.isTainted()) {
+      this.markTainted(
+        `Fatal storage I/O error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  getClockGuard(): ClockGuard {
+    return this.clockGuard;
+  }
+
   isLegacyAllowed(): boolean {
+    return this.allowLegacyArtifactVersions;
+  }
+
+  getAllowLegacyArtifactVersions(): boolean {
     return this.allowLegacyArtifactVersions;
   }
 
@@ -248,12 +375,25 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
 
       this.ensureGovernanceTables();
 
-      // Safe initialization of clock high-water state
-      this.db.prepare(`
-        INSERT INTO system_clock_state (id, high_water_seconds)
-        VALUES (1, ?)
-        ON CONFLICT(id) DO NOTHING;
-      `).run(this.clock.nowSeconds());
+      const existingClockRow = this.db.prepare(
+        "SELECT high_water_seconds FROM system_clock_state WHERE id = 1"
+      ).get() as { high_water_seconds: number } | undefined;
+
+      const currentNow = this.clock.nowSeconds();
+
+      if (!existingClockRow) {
+        this.db.prepare(`
+          INSERT INTO system_clock_state (id, high_water_seconds)
+          VALUES (1, ?)
+        `).run(currentNow);
+      } else {
+        const startupGap = currentNow - existingClockRow.high_water_seconds;
+        if (startupGap > this.clockGuard.getMaxStartupForwardGapSeconds()) {
+          throw new Error(
+            `Store startup rejected: forward clock gap of ${startupGap} seconds exceeds maximum allowed startup threshold (${this.clockGuard.getMaxStartupForwardGapSeconds()}s).`
+          );
+        }
+      }
     });
   }
 
@@ -473,40 +613,101 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     if (!Number.isSafeInteger(nowSeconds) || nowSeconds < 0) {
       throw new Error("Evaluation timestamp must be a non-negative safe integer.");
     }
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
 
-    withImmediateTransaction(this.db, () => {
-      const row = this.db.prepare(
-        "SELECT high_water_seconds FROM system_clock_state WHERE id = 1",
-      ).get() as { high_water_seconds: number } | undefined;
+    if (!this.clockGuard.acquireLock()) {
+      throw new Error("Concurrent transaction in progress within same process; operation serialized.");
+    }
 
-      if (!row) {
-        this.db.prepare(
-          "INSERT INTO system_clock_state (id, high_water_seconds) VALUES (1, ?)",
-        ).run(nowSeconds);
-        return;
+    try {
+      if (this.clock instanceof TestClock && nowSeconds > this.clock.nowSeconds()) {
+        this.clock.advance(nowSeconds - this.clock.nowSeconds());
       }
 
-      if (nowSeconds < row.high_water_seconds) {
-        throw new Error(
-          `Clock rollback detected: current time (${nowSeconds}s) precedes persisted high-water mark (${row.high_water_seconds}s).`,
+      const candidate: ClockCandidate = {
+        wallSeconds: nowSeconds,
+        monotonicNanos: this.clockGuard.getMonotonicClock().nowNanoseconds(),
+      };
+
+      try {
+        withImmediateTransaction(
+          this.db,
+          () => {
+            const row = this.db.prepare(
+              "SELECT high_water_seconds FROM system_clock_state WHERE id = 1",
+            ).get() as { high_water_seconds: number } | undefined;
+
+            if (!row) {
+              this.db.prepare(
+                "INSERT INTO system_clock_state (id, high_water_seconds) VALUES (1, ?)",
+              ).run(nowSeconds);
+              return;
+            }
+
+            const clockEval = this.clockGuard.evaluateCandidate(candidate, row.high_water_seconds);
+            if (clockEval.decision !== "ALLOW") {
+              throw new Error(clockEval.reason);
+            }
+
+            if (nowSeconds < row.high_water_seconds) {
+              throw new Error(
+                `Clock rollback detected: current time (${nowSeconds}s) precedes persisted high-water mark (${row.high_water_seconds}s).`,
+              );
+            }
+
+            if (nowSeconds > row.high_water_seconds) {
+              this.db.prepare(`
+                UPDATE system_clock_state
+                SET high_water_seconds = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1 AND high_water_seconds < ?
+              `).run(nowSeconds, nowSeconds);
+            }
+          },
+          undefined,
+          undefined,
+          undefined,
+          () => {
+            this.clockGuard.publishCandidate(candidate);
+          },
+          (commitErr) => {
+            this.markTainted(
+              `Commit failure with uncertain outcome: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`,
+            );
+          },
+          (rollbackErr) => {
+            this.markTainted(
+              `Fatal rollback failure: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+            );
+          },
         );
+      } catch (err) {
+        this.handleFatalIO(err);
+        throw err;
       }
-
-      if (nowSeconds > row.high_water_seconds) {
-        this.db.prepare(`
-          UPDATE system_clock_state
-          SET high_water_seconds = ?, updated_at = CURRENT_TIMESTAMP
-          WHERE id = 1 AND high_water_seconds < ?
-        `).run(nowSeconds, nowSeconds);
-      }
-    });
+    } finally {
+      this.clockGuard.releaseLock();
+    }
   }
 
   getHighWaterMark(): number | null {
-    const row = this.db.prepare(
-      "SELECT high_water_seconds FROM system_clock_state WHERE id = 1",
-    ).get() as { high_water_seconds: number } | undefined;
-    return row ? row.high_water_seconds : null;
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    try {
+      const row = this.db.prepare(
+        "SELECT high_water_seconds FROM system_clock_state WHERE id = 1",
+      ).get() as { high_water_seconds: number } | undefined;
+      return row ? row.high_water_seconds : null;
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
   }
 
   getClock(): Clock {
@@ -518,17 +719,30 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
    * Legacy reservations are classified as artifact_version = 1.
    */
   reserve(authorizationId: string): boolean {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    if (authorizationId.length > 128) {
+      throw new Error("Authorization ID exceeds maximum length of 128 characters.");
+    }
     if (!this.allowLegacyArtifactVersions) {
       throw new Error("Legacy authorization artifact versions are disabled by configuration.");
     }
 
-    const result = this.db.prepare(`
-      INSERT INTO consumed_authorization_ids (authorization_id, state, consumed_at, artifact_version)
-      VALUES (?, 'consumed', CURRENT_TIMESTAMP, 1)
-      ON CONFLICT(authorization_id) DO NOTHING
-    `).run(authorizationId);
+    try {
+      const result = this.db.prepare(`
+        INSERT INTO consumed_authorization_ids (authorization_id, state, consumed_at, artifact_version)
+        VALUES (?, 'consumed', CURRENT_TIMESTAMP, 1)
+        ON CONFLICT(authorization_id) DO NOTHING
+      `).run(authorizationId);
 
-    return result.changes === 1;
+      return result.changes === 1;
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
   }
 
   /**
@@ -543,24 +757,37 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     keyId?: string,
     issuedAtSeconds?: number,
   ): boolean {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    if (authorizationId.length > 128) {
+      throw new Error("Authorization ID exceeds maximum length of 128 characters.");
+    }
     if (version !== 3 && !this.allowLegacyArtifactVersions) {
       throw new Error("Legacy authorization artifact versions are disabled by configuration.");
     }
 
-    const result = this.db.prepare(`
-      INSERT INTO consumed_authorization_ids (
-        authorization_id, binding_digest, state, consumed_at, artifact_version, key_id, issued_at_seconds
-      ) VALUES (?, ?, 'issued', NULL, ?, ?, ?)
-      ON CONFLICT(authorization_id) DO NOTHING
-    `).run(
-      authorizationId,
-      bindingDigest,
-      version,
-      keyId ?? null,
-      issuedAtSeconds ?? null,
-    );
+    try {
+      const result = this.db.prepare(`
+        INSERT INTO consumed_authorization_ids (
+          authorization_id, binding_digest, state, consumed_at, artifact_version, key_id, issued_at_seconds
+        ) VALUES (?, ?, 'issued', NULL, ?, ?, ?)
+        ON CONFLICT(authorization_id) DO NOTHING
+      `).run(
+        authorizationId,
+        bindingDigest,
+        version,
+        keyId ?? null,
+        issuedAtSeconds ?? null,
+      );
 
-    return result.changes === 1;
+      return result.changes === 1;
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
   }
 
   /**
@@ -575,10 +802,33 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     keyId?: string,
     issuedAtSeconds?: number,
   ): boolean {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    if (authorizationId.length > 128) {
+      throw new Error("Authorization ID exceeds maximum length of 128 characters.");
+    }
     if (version !== 3 && !this.allowLegacyArtifactVersions) {
       throw new Error("Legacy authorization artifact versions are disabled by configuration.");
     }
-    if (keyId !== undefined && issuedAtSeconds !== undefined) {
+    try {
+      if (keyId !== undefined && issuedAtSeconds !== undefined) {
+        const result = this.db.prepare(`
+          UPDATE consumed_authorization_ids
+          SET state = 'consumed', consumed_at = CURRENT_TIMESTAMP
+          WHERE authorization_id = ?
+            AND binding_digest = ?
+            AND state = 'issued'
+            AND artifact_version = ?
+            AND key_id = ?
+            AND issued_at_seconds = ?
+        `).run(authorizationId, bindingDigest, version, keyId, issuedAtSeconds);
+
+        return result.changes === 1;
+      }
+
       const result = this.db.prepare(`
         UPDATE consumed_authorization_ids
         SET state = 'consumed', consumed_at = CURRENT_TIMESTAMP
@@ -586,72 +836,262 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
           AND binding_digest = ?
           AND state = 'issued'
           AND artifact_version = ?
-          AND key_id = ?
-          AND issued_at_seconds = ?
-      `).run(authorizationId, bindingDigest, version, keyId, issuedAtSeconds);
+      `).run(authorizationId, bindingDigest, version);
 
       return result.changes === 1;
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
+  }
+
+  /**
+   * Atomically cancels an issued, unconsumed authorization.
+   *
+   * Only transitions an authorization record from 'issued' to 'cancelled'.
+   * Returns true if the authorization was successfully cancelled.
+   * Returns false if the authorization is unknown, already consumed, already cancelled,
+   * or not in 'issued' state.
+   * Throws an Error if authorizationId exceeds maximum length of 128 characters,
+   * or if the record is a legacy artifact version when legacy artifacts are disabled.
+   */
+  cancelAuthorization(authorizationId: string): boolean {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    if (this.clockGuard.getState() === "TRIPPED_CLOSED") {
+      throw new Error(
+        `Store clock monitor is in a tripped state: ${this.clockGuard.getTripReason()}`,
+      );
+    }
+    if (this.clockGuard.getState() === "EXPIRED") {
+      throw new Error(
+        "Process clock anchor has expired (maximum uptime exceeded); restart required.",
+      );
+    }
+    if (typeof authorizationId !== "string") {
+      return false;
+    }
+    const normalized = authorizationId.trim();
+    if (normalized.length === 0) {
+      return false;
+    }
+    if (normalized.length > 128) {
+      throw new Error("Authorization ID exceeds maximum length of 128 characters.");
     }
 
-    const result = this.db.prepare(`
-      UPDATE consumed_authorization_ids
-      SET state = 'consumed', consumed_at = CURRENT_TIMESTAMP
-      WHERE authorization_id = ?
-        AND binding_digest = ?
-        AND state = 'issued'
-        AND artifact_version = ?
-    `).run(authorizationId, bindingDigest, version);
+    if (!this.clockGuard.acquireLock()) {
+      throw new Error(
+        "Concurrent transaction in progress within same process; ClockGuard lock acquisition failed.",
+      );
+    }
 
-    return result.changes === 1;
+    try {
+      try {
+        return withImmediateTransaction(
+          this.db,
+          () => {
+            const row = this.db.prepare(
+              "SELECT artifact_version, state FROM consumed_authorization_ids WHERE authorization_id = ?"
+            ).get(normalized) as { artifact_version: number; state: string } | undefined;
+
+            if (!row || row.state !== "issued") {
+              return false;
+            }
+
+            if (row.artifact_version !== 3 && !this.allowLegacyArtifactVersions) {
+              throw new Error("Legacy authorization artifact versions are disabled by configuration.");
+            }
+
+            const result = this.db.prepare(`
+              UPDATE consumed_authorization_ids
+              SET state = 'cancelled', consumed_at = CURRENT_TIMESTAMP
+              WHERE authorization_id = ? AND state = 'issued'
+            `).run(normalized);
+
+            return result.changes === 1;
+          },
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (commitErr) => {
+            this.markTainted(
+              `Commit failure with uncertain outcome: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`,
+            );
+          },
+          (rollbackErr) => {
+            this.markTainted(
+              `Fatal rollback failure: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+            );
+          },
+        );
+      } catch (err) {
+        this.handleFatalIO(err);
+        throw err;
+      }
+    } finally {
+      this.clockGuard.releaseLock();
+    }
   }
 
   getDatabase(): DatabaseSync {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
     return this.db;
   }
 
   getPolicyStore(): SQLitePolicyStore {
-    return new SQLitePolicyStore(this.db, this.clock);
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    return new SQLitePolicyStore(this.db, this.clock, this.clockGuard, {
+      onFatalTaint: (reason) => this.markTainted(reason),
+    });
   }
 
   getKeyStore(): SQLiteKeyStore {
-    return new SQLiteKeyStore(this.db, this.clock);
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    return new SQLiteKeyStore(this.db, this.clock, this.clockGuard, {
+      onFatalTaint: (reason) => this.markTainted(reason),
+    });
   }
 
-  getAuthorizationRecord(authorizationId: string): {
-    authorizationId: string;
-    bindingDigest: string | null;
-    state: "issued" | "consumed" | "legacy_void" | "cancelled";
-    consumedAt: string | null;
-    artifactVersion: number;
-    keyId: string | null;
-    issuedAtSeconds: number | null;
-  } | null {
-    const row = this.db.prepare(
-      "SELECT * FROM consumed_authorization_ids WHERE authorization_id = ?"
-    ).get(authorizationId) as {
-      authorization_id: string;
-      binding_digest: string | null;
-      state: "issued" | "consumed" | "legacy_void" | "cancelled";
-      consumed_at: string | null;
-      artifact_version: number;
-      key_id: string | null;
-      issued_at_seconds: number | null;
-    } | undefined;
+  getAuthorizationRecord(authorizationId: string): AuthorizationRecord | null {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    try {
+      const row = this.db.prepare(
+        "SELECT * FROM consumed_authorization_ids WHERE authorization_id = ?"
+      ).get(authorizationId) as {
+        authorization_id: string;
+        binding_digest: string | null;
+        state: "issued" | "consumed" | "legacy_void" | "cancelled";
+        consumed_at: string | null;
+        artifact_version: number;
+        key_id: string | null;
+        issued_at_seconds: number | null;
+      } | undefined;
 
-    if (!row) return null;
+      if (!row) return null;
 
-    return {
-      authorizationId: row.authorization_id,
-      bindingDigest: row.binding_digest,
-      state: row.state,
-      consumedAt: row.consumed_at,
-      artifactVersion: row.artifact_version,
-      keyId: row.key_id,
-      issuedAtSeconds: row.issued_at_seconds,
-    };
+      return {
+        authorizationId: row.authorization_id,
+        bindingDigest: row.binding_digest,
+        state: row.state,
+        consumedAt: row.consumed_at,
+        artifactVersion: row.artifact_version,
+        keyId: row.key_id,
+        issuedAtSeconds: row.issued_at_seconds,
+      };
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
+  }
+
+  getSynchronousMode(): SQLiteSynchronousMode {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    try {
+      const row = this.db.prepare("PRAGMA synchronous;").get() as { synchronous: number } | undefined;
+      switch (row?.synchronous) {
+        case 0:
+          return "OFF";
+        case 1:
+          return "NORMAL";
+        case 2:
+          return "FULL";
+        case 3:
+          return "EXTRA";
+        default:
+          return "FULL";
+      }
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
+  }
+
+  getJournalMode(): string {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    try {
+      const row = this.db.prepare("PRAGMA journal_mode;").get() as { journal_mode: string } | undefined;
+      return row?.journal_mode ?? "unknown";
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
+  }
+
+  checkpoint(mode: CheckpointMode = "PASSIVE"): CheckpointResult {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    const validModes: CheckpointMode[] = ["PASSIVE", "FULL", "RESTART", "TRUNCATE"];
+    if (!validModes.includes(mode)) {
+      throw new Error(
+        `Invalid checkpoint mode: '${String(mode)}'. Valid modes are PASSIVE, FULL, RESTART, TRUNCATE.`,
+      );
+    }
+
+    try {
+      const row = this.db.prepare(`PRAGMA wal_checkpoint(${mode});`).get() as
+        | { busy: number; log: number; checkpointed: number }
+        | undefined;
+
+      return {
+        busy: row ? row.busy !== 0 : false,
+        logFrames: row ? row.log : 0,
+        checkpointedFrames: row ? row.checkpointed : 0,
+      };
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
+  }
+
+  checkIntegrity(): boolean {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+    try {
+      const rows = this.db.prepare("PRAGMA integrity_check;").all() as Array<{ integrity_check: string }>;
+      return rows.length === 1 && rows[0].integrity_check === "ok";
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
   }
 
   close(): void {
-    this.db.close();
+    try {
+      this.db.close();
+    } catch {}
   }
 }

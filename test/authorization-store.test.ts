@@ -1,4 +1,4 @@
-﻿import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,7 +10,9 @@ describe("SQLiteAuthorizationStore", () => {
 
   function createStore() {
     directory ??= mkdtempSync(join(tmpdir(), "web3user-auth-"));
-    const store = new SQLiteAuthorizationStore(join(directory, "auth.sqlite"));
+    const store = new SQLiteAuthorizationStore(join(directory, "auth.sqlite"), undefined, {
+      allowLegacyArtifactVersions: true,
+    });
     stores.add(store);
     return store;
   }
@@ -86,7 +88,9 @@ describe("persistent authorization consumption", () => {
 
   function createStore() {
     directory ??= mkdtempSync(join(tmpdir(), "web3user-lifecycle-"));
-    const store = new SQLiteAuthorizationStore(join(directory, "auth.sqlite"));
+    const store = new SQLiteAuthorizationStore(join(directory, "auth.sqlite"), undefined, {
+      allowLegacyArtifactVersions: true,
+    });
     stores.add(store);
     return store;
   }
@@ -346,6 +350,131 @@ describe("persistent authorization consumption", () => {
     } finally {
       closeStore(store);
     }
+  });
+
+  describe("Milestone 6.5: Fail-closed strict default artifact version enforcement", () => {
+    it("enforces fail-closed default where allowLegacyArtifactVersions defaults to false", () => {
+      directory ??= mkdtempSync(join(tmpdir(), "web3user-strict-default-"));
+      const strictStore = new SQLiteAuthorizationStore(join(directory, "strict.sqlite"));
+      stores.add(strictStore);
+
+      try {
+        expect(strictStore.getAllowLegacyArtifactVersions()).toBe(false);
+
+        // 1. reserve() directly fails closed
+        expect(() => strictStore.reserve("strict-reserve-id")).toThrow(
+          "Legacy authorization artifact versions are disabled by configuration.",
+        );
+
+        // 2. issueBound() directly fails closed for versions 1 and 2
+        expect(() => strictStore.issueBound("strict-issue-1", "sha256:dummy", 1)).toThrow(
+          "Legacy authorization artifact versions are disabled by configuration.",
+        );
+        expect(() => strictStore.issueBound("strict-issue-2", "sha256:dummy", 2)).toThrow(
+          "Legacy authorization artifact versions are disabled by configuration.",
+        );
+
+        // 3. consumeBound() directly fails closed for versions 1 and 2
+        expect(() => strictStore.consumeBound("strict-consume-1", "sha256:dummy", 1)).toThrow(
+          "Legacy authorization artifact versions are disabled by configuration.",
+        );
+        expect(() => strictStore.consumeBound("strict-consume-2", "sha256:dummy", 2)).toThrow(
+          "Legacy authorization artifact versions are disabled by configuration.",
+        );
+
+        // 4. V3 operations succeed under the strict default
+        expect(strictStore.issueBound("strict-issue-3", "sha256:dummy", 3, "key-01", 1000)).toBe(true);
+        expect(strictStore.consumeBound("strict-issue-3", "sha256:dummy", 3, "key-01", 1000)).toBe(true);
+      } finally {
+        closeStore(strictStore);
+      }
+    });
+
+    it("allows legacy operations when caller explicitly passes allowLegacyArtifactVersions: true", () => {
+      directory ??= mkdtempSync(join(tmpdir(), "web3user-compat-optin-"));
+      const compatStore = new SQLiteAuthorizationStore(join(directory, "compat.sqlite"), undefined, {
+        allowLegacyArtifactVersions: true,
+      });
+      stores.add(compatStore);
+
+      try {
+        expect(compatStore.getAllowLegacyArtifactVersions()).toBe(true);
+        expect(compatStore.reserve("compat-reserve-id")).toBe(true);
+        expect(compatStore.issueBound("compat-issue-1", "sha256:dummy", 1)).toBe(true);
+        expect(compatStore.consumeBound("compat-issue-1", "sha256:dummy", 1)).toBe(true);
+      } finally {
+        closeStore(compatStore);
+      }
+    });
+  });
+
+  describe("Milestone 6.11 Stage B: SQLite Durability and PRAGMA Configuration", () => {
+    it("configures PRAGMA journal_mode = WAL and synchronous = FULL by default on SQLiteAuthorizationStore", () => {
+      directory ??= mkdtempSync(join(tmpdir(), "web3user-durability-default-"));
+      const store = new SQLiteAuthorizationStore(join(directory, "durability-default.sqlite"));
+      stores.add(store);
+
+      try {
+        expect(store.getJournalMode()).toBe("wal");
+        expect(store.getSynchronousMode()).toBe("FULL");
+
+        // Verify raw SQLite PRAGMA return values directly from the database connection
+        const db = store.getDatabase();
+        const syncRow = db.prepare("PRAGMA synchronous;").get() as { synchronous: number };
+        expect(syncRow.synchronous).toBe(2); // 2 == FULL
+
+        const journalRow = db.prepare("PRAGMA journal_mode;").get() as { journal_mode: string };
+        expect(journalRow.journal_mode).toBe("wal");
+      } finally {
+        closeStore(store);
+      }
+    });
+
+    it("respects explicit synchronous configuration options across connections", () => {
+      directory ??= mkdtempSync(join(tmpdir(), "web3user-durability-options-"));
+
+      const normalStore = new SQLiteAuthorizationStore(join(directory, "durability-normal.sqlite"), undefined, {
+        synchronous: "NORMAL",
+      });
+      stores.add(normalStore);
+
+      const offStore = new SQLiteAuthorizationStore(join(directory, "durability-off.sqlite"), undefined, {
+        synchronous: "OFF",
+      });
+      stores.add(offStore);
+
+      try {
+        expect(normalStore.getSynchronousMode()).toBe("NORMAL");
+        expect((normalStore.getDatabase().prepare("PRAGMA synchronous;").get() as { synchronous: number }).synchronous).toBe(1);
+
+        expect(offStore.getSynchronousMode()).toBe("OFF");
+        expect((offStore.getDatabase().prepare("PRAGMA synchronous;").get() as { synchronous: number }).synchronous).toBe(0);
+      } finally {
+        closeStore(normalStore);
+        closeStore(offStore);
+      }
+    });
+
+    it("ensures derived PolicyStore and KeyStore share the configured connection durability", () => {
+      directory ??= mkdtempSync(join(tmpdir(), "web3user-durability-borrowed-"));
+      const store = new SQLiteAuthorizationStore(join(directory, "durability-borrowed.sqlite"), undefined, {
+        synchronous: "FULL",
+      });
+      stores.add(store);
+
+      try {
+        const policyStore = store.getPolicyStore();
+        const keyStore = store.getKeyStore();
+
+        expect(policyStore.getSynchronousMode()).toBe("FULL");
+        expect(policyStore.getJournalMode()).toBe("wal");
+
+        expect(keyStore.getSynchronousMode()).toBe("FULL");
+        expect(keyStore.getJournalMode()).toBe("wal");
+      } finally {
+        closeStore(store);
+      }
+    });
   });
 });
 

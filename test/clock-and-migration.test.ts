@@ -1,4 +1,4 @@
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -208,7 +208,16 @@ describe("Milestone 6.2 Phase 1: Governance Tables and Schema Migration", () => 
 
   it("migrates a disposable copy of historical Milestone 5A database preserving tombstones", () => {
     const dbFile = databasePath("auth-5a-copy.sqlite");
-    copyFileSync(".demo-data/authorization-replay.sqlite", dbFile);
+    const initDb = new DatabaseSync(dbFile);
+    initDb.exec(`
+      CREATE TABLE consumed_authorization_ids (
+        authorization_id TEXT PRIMARY KEY,
+        consumed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO consumed_authorization_ids (authorization_id, consumed_at)
+      VALUES ('persistent-replay-demo-authorization-001', '2026-10-22 07:09:28');
+    `);
+    initDb.close();
 
     // Verify pre-migration state in disposable copy
     const preDb = new DatabaseSync(dbFile);
@@ -245,7 +254,23 @@ describe("Milestone 6.2 Phase 1: Governance Tables and Schema Migration", () => 
 
   it("migrates a disposable copy of historical Milestone 5B database preserving bound tombstones", () => {
     const dbFile = databasePath("auth-5b-copy.sqlite");
-    copyFileSync(".demo-data/bound-authorization-replay.sqlite", dbFile);
+    const initDb = new DatabaseSync(dbFile);
+    initDb.exec(`
+      CREATE TABLE consumed_authorization_ids (
+        authorization_id TEXT PRIMARY KEY,
+        binding_digest TEXT,
+        state TEXT NOT NULL DEFAULT 'consumed' CHECK (state IN ('issued', 'consumed')),
+        consumed_at TEXT
+      );
+      INSERT INTO consumed_authorization_ids (authorization_id, binding_digest, state, consumed_at)
+      VALUES (
+        'bound-replay-demo-authorization-001',
+        'sha256:348983bd01c1634e24c6bccaab93e8ccdbd161ec3ffa9799c7ea0b70aba0e4be',
+        'consumed',
+        '2026-10-22 13:47:03'
+      );
+    `);
+    initDb.close();
 
     const preDb = new DatabaseSync(dbFile);
     const preRows = preDb.prepare("SELECT * FROM consumed_authorization_ids").all() as Array<{
@@ -363,12 +388,12 @@ describe("Milestone 6.2 Phase 1: Governance Tables and Schema Migration", () => 
 
   it("preserves V3 schema on subsequent restarts without repeating migration (idempotent)", () => {
     const dbFile = databasePath("idempotent-test.sqlite");
-    const store1 = new SQLiteAuthorizationStore(dbFile, new TestClock(5000));
+    const store1 = new SQLiteAuthorizationStore(dbFile, new TestClock(5000), { allowLegacyArtifactVersions: true });
     store1.reserve("auth-restart-001");
     store1.issueBound("auth-restart-002", "sha256:restart", 3, "key-001", 5000);
     store1.close();
 
-    const store2 = new SQLiteAuthorizationStore(dbFile, new TestClock(5000));
+    const store2 = new SQLiteAuthorizationStore(dbFile, new TestClock(5000), { allowLegacyArtifactVersions: true });
     try {
       const postDb = new DatabaseSync(dbFile);
       try {
@@ -675,17 +700,17 @@ describe("Phase 1 Remediation: Ambiguous Migration Recovery & Atomic Discovery",
   // Test 7: Re-running migration is idempotent.
   it("re-running migration across repeated opens is completely idempotent", () => {
     const dbFile = databasePath("re-run-idempotent.sqlite");
-    const store1 = new SQLiteAuthorizationStore(dbFile, new TestClock(100));
+    const store1 = new SQLiteAuthorizationStore(dbFile, new TestClock(100), { allowLegacyArtifactVersions: true });
     store1.reserve("idempotent-tombstone-001");
     store1.close();
 
     // Reopen 2
-    const store2 = new SQLiteAuthorizationStore(dbFile, new TestClock(100));
+    const store2 = new SQLiteAuthorizationStore(dbFile, new TestClock(100), { allowLegacyArtifactVersions: true });
     store2.reserve("idempotent-tombstone-002");
     store2.close();
 
     // Reopen 3
-    const store3 = new SQLiteAuthorizationStore(dbFile, new TestClock(100));
+    const store3 = new SQLiteAuthorizationStore(dbFile, new TestClock(100), { allowLegacyArtifactVersions: true });
     try {
       const verifyDb = new DatabaseSync(dbFile);
       try {

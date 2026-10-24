@@ -55,7 +55,9 @@ describe("bound transaction authorization", () => {
   }
 
   function createStore(): SQLiteAuthorizationStore {
-    const store = new SQLiteAuthorizationStore(databasePath());
+    const store = new SQLiteAuthorizationStore(databasePath(), undefined, {
+      allowLegacyArtifactVersions: true,
+    });
     stores.add(store);
     return store;
   }

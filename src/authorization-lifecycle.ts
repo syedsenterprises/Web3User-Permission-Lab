@@ -1,5 +1,6 @@
 import type { KeyObject } from "node:crypto";
 import type { AuthorizationIdStore } from "./authorization-store.js";
+import { type ClockCandidate } from "./clock.js";
 import {
   revalidateTransactionAuthorization,
   type TransactionAuthorization,
@@ -28,6 +29,7 @@ import {
 import { SQLiteAuthorizationStore } from "./authorization-store.js";
 import {
   beginImmediateWithRetry,
+  isFatalIOError,
   CONTENTION_RETRY_DELAY_MS,
   MAX_CONTENTION_RETRIES,
 } from "./sqlite-transaction.js";
@@ -49,14 +51,42 @@ function deny(reason: string): Evaluation & { decision: "DENY" } {
   };
 }
 
+export const MAX_AUTHORIZATION_ID_LENGTH = 128;
+export const MAX_PROCESS_LOCAL_CONSUMED_IDS = 10_000;
+
+export function getConsumedAuthorizationIdsCount(): number {
+  return consumedAuthorizationIds.size;
+}
+
 /**
- * Authorization IDs are trimmed, non-empty strings. Comparison is
- * case-sensitive; the caller is responsible for issuing and binding IDs.
+ * Validates an authorization ID, ensuring it is a non-empty string of bounded length.
+ */
+export function validateAuthorizationId(
+  input: unknown,
+): { ok: true; id: string } | { ok: false; reason: string } {
+  if (typeof input !== "string") {
+    return { ok: false, reason: "A non-empty authorization ID is required." };
+  }
+  const normalized = input.trim();
+  if (normalized.length === 0) {
+    return { ok: false, reason: "A non-empty authorization ID is required." };
+  }
+  if (normalized.length > MAX_AUTHORIZATION_ID_LENGTH) {
+    return {
+      ok: false,
+      reason: `Authorization ID exceeds maximum length of ${MAX_AUTHORIZATION_ID_LENGTH} characters.`,
+    };
+  }
+  return { ok: true, id: normalized };
+}
+
+/**
+ * Authorization IDs are trimmed, non-empty strings of at most 128 characters.
+ * Comparison is case-sensitive; the caller is responsible for issuing and binding IDs.
  */
 function normalizeAuthorizationId(input: unknown): string | null {
-  if (typeof input !== "string") return null;
-  const normalized = input.trim();
-  return normalized.length > 0 ? normalized : null;
+  const result = validateAuthorizationId(input);
+  return result.ok ? result.id : null;
 }
 
 export type BoundTransactionAuthorization =
@@ -104,9 +134,13 @@ function consume(
   contextInput: unknown,
   authorizationId?: string,
 ): TransactionAuthorization {
-  if (authorizationId !== undefined &&
-      consumedAuthorizationIds.has(authorizationId)) {
-    return deny("Transaction authorization ID has already been consumed.");
+  if (authorizationId !== undefined) {
+    if (consumedAuthorizationIds.has(authorizationId)) {
+      return deny("Transaction authorization ID has already been consumed.");
+    }
+    if (consumedAuthorizationIds.size >= MAX_PROCESS_LOCAL_CONSUMED_IDS) {
+      return deny("Process-local authorization capacity exceeded; durable storage is required for long-running replay protection.");
+    }
   }
 
   if (isObject(envelopeInput) && consumedEnvelopes.has(envelopeInput)) {
@@ -132,6 +166,9 @@ function consume(
   }
 
   if (authorizationId !== undefined) {
+    if (consumedAuthorizationIds.size >= MAX_PROCESS_LOCAL_CONSUMED_IDS) {
+      return deny("Process-local authorization capacity exceeded; durable storage is required for long-running replay protection.");
+    }
     consumedAuthorizationIds.add(authorizationId);
   }
 
@@ -172,10 +209,11 @@ export function consumeTransactionAuthorizationById(
   candidateInput: unknown,
   contextInput: unknown,
 ): TransactionAuthorization {
-  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
-  if (authorizationId === null) {
-    return deny("A non-empty authorization ID is required.");
+  const authValidation = validateAuthorizationId(authorizationIdInput);
+  if (!authValidation.ok) {
+    return deny(authValidation.reason);
   }
+  const authorizationId = authValidation.id;
 
   return consume(
     policyInput,
@@ -205,10 +243,11 @@ export function consumeTransactionAuthorizationWithStore(
   candidateInput: unknown,
   contextInput: unknown,
 ): TransactionAuthorization {
-  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
-  if (authorizationId === null) {
-    return deny("A non-empty authorization ID is required.");
+  const authValidation = validateAuthorizationId(authorizationIdInput);
+  if (!authValidation.ok) {
+    return deny(authValidation.reason);
   }
+  const authorizationId = authValidation.id;
 
   if (isObject(envelopeInput) && consumedEnvelopes.has(envelopeInput)) {
     return deny("Transaction authorization has already been consumed.");
@@ -247,10 +286,11 @@ export function issueBoundTransactionAuthorizationWithStore(
   requestInput: unknown,
   contextInput: unknown,
 ): BoundTransactionAuthorization {
-  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
-  if (authorizationId === null) {
-    return deny("A non-empty authorization ID is required.");
+  const authValidation = validateAuthorizationId(authorizationIdInput);
+  if (!authValidation.ok) {
+    return deny(authValidation.reason);
   }
+  const authorizationId = authValidation.id;
 
   const prepared = prepareTransactionAuthorization(
     policyInput,
@@ -360,10 +400,11 @@ export function issueSignedTransactionAuthorizationWithStore(
   requestInput: unknown,
   contextInput: unknown,
 ): SignedTransactionAuthorization {
-  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
-  if (authorizationId === null) {
-    return deny("A non-empty authorization ID is required.");
+  const authValidation = validateAuthorizationId(authorizationIdInput);
+  if (!authValidation.ok) {
+    return deny(authValidation.reason);
   }
+  const authorizationId = authValidation.id;
 
   if (typeof signer !== "object" || signer === null) {
     return deny("Signer specification is required.");
@@ -625,10 +666,11 @@ export function issueSignedTransactionAuthorizationV3(
     return deny("A valid SQLiteAuthorizationStore instance is required.");
   }
 
-  const authorizationId = normalizeAuthorizationId(authorizationIdInput);
-  if (authorizationId === null) {
-    return deny("A non-empty authorization ID is required.");
+  const authValidation = validateAuthorizationId(authorizationIdInput);
+  if (!authValidation.ok) {
+    return deny(authValidation.reason);
   }
+  const authorizationId = authValidation.id;
 
   if (typeof signer !== "object" || signer === null) {
     return deny("Signer specification is required.");
@@ -649,17 +691,44 @@ export function issueSignedTransactionAuthorizationV3(
     return deny("A non-empty policy ID is required.");
   }
 
-  // 1. Capture trusted clock snapshot
-  const clock = store.getClock();
-  const nowSeconds = clock.nowSeconds();
+  // 1. Check tainted store state and acquire in-process lock
+  if (store.isTainted()) {
+    return deny(
+      `SQLiteAuthorizationStore database connection is tainted and unusable: ${store.getTaintedReason()}`,
+    );
+  }
 
-  const db = store.getDatabase();
+  const guard = store.getClockGuard();
+  if (!guard.acquireLock()) {
+    return deny("Concurrent transaction in progress within same process; operation serialized.");
+  }
+
+  const clock = store.getClock();
+  const initialNow = clock.nowSeconds();
+
+  let db: ReturnType<typeof store.getDatabase>;
+  try {
+    db = store.getDatabase();
+  } catch (err) {
+    guard.releaseLock();
+    return deny(err instanceof Error ? err.message : String(err));
+  }
+
   if (!beginImmediateWithRetry(db)) {
+    guard.releaseLock();
     return deny("Database is busy; transaction contention retry limit exceeded.");
   }
 
+  let candidate: ClockCandidate;
+
   try {
-    // 2. Validate time against persisted high-water mark inside the write lock
+    // 2. Validate candidate time against guard and persisted high-water mark inside write lock
+    const clock = store.getClock();
+    candidate = {
+      wallSeconds: clock.nowSeconds(),
+      monotonicNanos: guard.getMonotonicClock().nowNanoseconds(),
+    };
+
     const clockRow = db.prepare(
       "SELECT high_water_seconds FROM system_clock_state WHERE id = 1"
     ).get() as { high_water_seconds: number } | undefined;
@@ -671,17 +740,13 @@ export function issueSignedTransactionAuthorizationV3(
 
     const highWaterSeconds = clockRow.high_water_seconds;
 
-    if (nowSeconds < highWaterSeconds) {
-      const currentNow = clock.nowSeconds();
-      if (currentNow < highWaterSeconds) {
-        db.exec("ROLLBACK;");
-        return deny(
-          `Clock rollback detected: current time (${currentNow}s) precedes persisted high-water mark (${highWaterSeconds}s).`
-        );
-      }
+    const clockEval = guard.evaluateCandidate(candidate, highWaterSeconds);
+    if (clockEval.decision !== "ALLOW") {
+      db.exec("ROLLBACK;");
+      return deny(clockEval.reason ?? "Clock evaluation failed.");
     }
 
-    const currentNow = clock.nowSeconds();
+    const currentNow = candidate.wallSeconds;
     const effectiveNowSeconds = Math.max(currentNow, highWaterSeconds);
 
     if (effectiveNowSeconds > highWaterSeconds) {
@@ -795,15 +860,34 @@ export function issueSignedTransactionAuthorizationV3(
       }
     }
 
-    let effectiveExpiresAt = effectiveNowSeconds + ttlSeconds;
+    // Determine ceiling deadline across policy, issuer key, and maximum safe integer
+    let maxAllowedExpiresAt = Number.MAX_SAFE_INTEGER;
     if (authoritativePolicy.expiresAt !== undefined && authoritativePolicy.expiresAt !== null) {
-      effectiveExpiresAt = Math.min(effectiveExpiresAt, authoritativePolicy.expiresAt);
+      maxAllowedExpiresAt = Math.min(maxAllowedExpiresAt, authoritativePolicy.expiresAt);
     }
     if (keyRow.expires_at_seconds !== null) {
-      effectiveExpiresAt = Math.min(effectiveExpiresAt, keyRow.expires_at_seconds);
+      maxAllowedExpiresAt = Math.min(maxAllowedExpiresAt, keyRow.expires_at_seconds);
     }
 
-    if (effectiveExpiresAt <= effectiveNowSeconds) {
+    if (maxAllowedExpiresAt <= effectiveNowSeconds) {
+      db.exec("ROLLBACK;");
+      return deny("Authorization validity interval is empty: policy or issuer key has already expired.");
+    }
+
+    // Compute effective expiration without unsafe integer addition overflow:
+    // If the requested TTL exceeds the remaining time until the deadline, cap at maxAllowedExpiresAt.
+    // Otherwise, effectiveNowSeconds + ttlSeconds is guaranteed to be strictly within safe integer limits.
+    const remainingValidSeconds = maxAllowedExpiresAt - effectiveNowSeconds;
+    const effectiveExpiresAt =
+      ttlSeconds >= remainingValidSeconds
+        ? maxAllowedExpiresAt
+        : effectiveNowSeconds + ttlSeconds;
+
+    if (
+      !Number.isSafeInteger(effectiveExpiresAt) ||
+      effectiveExpiresAt < 0 ||
+      effectiveExpiresAt <= effectiveNowSeconds
+    ) {
       db.exec("ROLLBACK;");
       return deny("Authorization validity interval is empty: policy or issuer key has already expired.");
     }
@@ -873,7 +957,14 @@ export function issueSignedTransactionAuthorizationV3(
       return deny("Transaction authorization ID has already been issued or consumed.");
     }
 
-    db.exec("COMMIT;");
+    try {
+      db.exec("COMMIT;");
+      guard.publishCandidate(candidate);
+    } catch (commitErr) {
+      const reason = `Commit failure with uncertain outcome: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`;
+      store.markTainted(reason);
+      throw commitErr;
+    }
 
     return {
       ...prepared,
@@ -890,10 +981,24 @@ export function issueSignedTransactionAuthorizationV3(
       }),
     };
   } catch (err) {
+    let rollbackFatalErr: unknown;
     try {
       db.exec("ROLLBACK;");
-    } catch {}
+    } catch (rollbackErr) {
+      if (isFatalIOError(rollbackErr)) {
+        rollbackFatalErr = rollbackErr;
+      }
+    }
+    if (rollbackFatalErr) {
+      const reason = `Fatal rollback failure: ${rollbackFatalErr instanceof Error ? rollbackFatalErr.message : String(rollbackFatalErr)}`;
+      store.markTainted(reason);
+    } else if (isFatalIOError(err)) {
+      const reason = `Fatal storage I/O error: ${err instanceof Error ? err.message : String(err)}`;
+      store.markTainted(reason);
+    }
     throw err;
+  } finally {
+    guard.releaseLock();
   }
 }
 
@@ -925,17 +1030,44 @@ export function consumeSignedTransactionAuthorizationV3(
   }
   const artifact: SignedAuthorizationArtifactV3 = artifactInput;
 
-  // 2. Capture trusted clock & rollback check
-  const clock = store.getClock();
-  const nowSeconds = clock.nowSeconds();
+  // 2. Check tainted store state and acquire in-process lock
+  if (store.isTainted()) {
+    return deny(
+      `SQLiteAuthorizationStore database connection is tainted and unusable: ${store.getTaintedReason()}`,
+    );
+  }
 
-  const db = store.getDatabase();
+  const guard = store.getClockGuard();
+  if (!guard.acquireLock()) {
+    return deny("Concurrent transaction in progress within same process; operation serialized.");
+  }
+
+  const clock = store.getClock();
+  const initialNow = clock.nowSeconds();
+
+  let db: ReturnType<typeof store.getDatabase>;
+  try {
+    db = store.getDatabase();
+  } catch (err) {
+    guard.releaseLock();
+    return deny(err instanceof Error ? err.message : String(err));
+  }
+
   if (!beginImmediateWithRetry(db)) {
+    guard.releaseLock();
     return deny("Database is busy; transaction contention retry limit exceeded.");
   }
 
+  let candidate: ClockCandidate;
+
   try {
-    // 2. Validate time against persisted high-water mark inside the write lock
+    // 2. Validate candidate time against guard and persisted high-water mark inside write lock
+    const clock = store.getClock();
+    candidate = {
+      wallSeconds: clock.nowSeconds(),
+      monotonicNanos: guard.getMonotonicClock().nowNanoseconds(),
+    };
+
     const clockRow = db.prepare(
       "SELECT high_water_seconds FROM system_clock_state WHERE id = 1"
     ).get() as { high_water_seconds: number } | undefined;
@@ -947,17 +1079,13 @@ export function consumeSignedTransactionAuthorizationV3(
 
     const highWaterSeconds = clockRow.high_water_seconds;
 
-    if (nowSeconds < highWaterSeconds) {
-      const currentNow = clock.nowSeconds();
-      if (currentNow < highWaterSeconds) {
-        db.exec("ROLLBACK;");
-        return deny(
-          `Clock rollback detected: current time (${currentNow}s) precedes persisted high-water mark (${highWaterSeconds}s).`
-        );
-      }
+    const clockEval = guard.evaluateCandidate(candidate, highWaterSeconds);
+    if (clockEval.decision !== "ALLOW") {
+      db.exec("ROLLBACK;");
+      return deny(clockEval.reason ?? "Clock evaluation failed.");
     }
 
-    const currentNow = clock.nowSeconds();
+    const currentNow = candidate.wallSeconds;
     const effectiveNowSeconds = Math.max(currentNow, highWaterSeconds);
 
     if (effectiveNowSeconds > highWaterSeconds) {
@@ -1096,7 +1224,12 @@ export function consumeSignedTransactionAuthorizationV3(
       };
     }
 
-    // 6. Enforce signed authorization expiry and boundaries
+    // 6. Enforce anti-time-travel check and signed authorization expiry/boundaries
+    if (artifact.issuedAtSeconds > currentNow) {
+      db.exec("ROLLBACK;");
+      return deny("Authorization issuance timestamp is in the future relative to current clock.");
+    }
+
     // Exact expiry boundary: consumption at effectiveNowSeconds >= expiresAtSeconds is DENIED
     if (effectiveNowSeconds >= artifact.expiresAtSeconds) {
       db.exec("ROLLBACK;");
@@ -1162,13 +1295,101 @@ export function consumeSignedTransactionAuthorizationV3(
       return deny("Bound transaction authorization is unknown, consumed, or mismatched.");
     }
 
-    db.exec("COMMIT;");
+    try {
+      db.exec("COMMIT;");
+      guard.publishCandidate(candidate);
+    } catch (commitErr) {
+      const reason = `Commit failure with uncertain outcome: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`;
+      store.markTainted(reason);
+      throw commitErr;
+    }
+
     consumedEnvelopes.add(revalResult.envelope);
     return revalResult;
   } catch (err) {
+    let rollbackFatalErr: unknown;
     try {
       db.exec("ROLLBACK;");
-    } catch {}
+    } catch (rollbackErr) {
+      if (isFatalIOError(rollbackErr)) {
+        rollbackFatalErr = rollbackErr;
+      }
+    }
+    if (rollbackFatalErr) {
+      const reason = `Fatal rollback failure: ${rollbackFatalErr instanceof Error ? rollbackFatalErr.message : String(rollbackFatalErr)}`;
+      store.markTainted(reason);
+    } else if (isFatalIOError(err)) {
+      const reason = `Fatal storage I/O error: ${err instanceof Error ? err.message : String(err)}`;
+      store.markTainted(reason);
+    }
     throw err;
+  } finally {
+    guard.releaseLock();
   }
 }
+
+/**
+ * Asserts store infrastructure health before processing cancellation.
+ * Ensures tainted connections or tripped/expired clock guards fail closed with explicit
+ * errors rather than masking infrastructure failure as false or invalid ID outcomes.
+ */
+function assertStoreHealthForCancellation(store: unknown): void {
+  if (!store || typeof store !== "object") return;
+  const s = store as Partial<SQLiteAuthorizationStore>;
+  if (typeof s.isTainted === "function" && s.isTainted()) {
+    throw new Error(
+      `SQLiteAuthorizationStore database connection is tainted and unusable: ${s.getTaintedReason?.()}`,
+    );
+  }
+  if (typeof s.getClockGuard === "function") {
+    const guard = s.getClockGuard();
+    if (guard) {
+      if (guard.getState() === "TRIPPED_CLOSED") {
+        throw new Error(
+          `Store clock monitor is in a tripped state: ${guard.getTripReason()}`,
+        );
+      }
+      if (guard.getState() === "EXPIRED") {
+        throw new Error(
+          "Process clock anchor has expired (maximum uptime exceeded); restart required.",
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Atomically cancels an issued, unconsumed transaction authorization.
+ *
+ * Enforces store health precedence, then validates authorization ID format and delegates
+ * to the persistent store's atomic cancelAuthorization method. Returns true if
+ * cancellation succeeded, false if unknown, already consumed, already cancelled,
+ * or invalid ID on a healthy store.
+ */
+export function cancelAuthorization(
+  storeInput:
+    | SQLiteAuthorizationStore
+    | BoundAuthorizationIdStore
+    | { store: SQLiteAuthorizationStore | BoundAuthorizationIdStore },
+  authorizationIdInput: unknown,
+): boolean {
+  const store =
+    typeof storeInput === "object" && storeInput !== null && "store" in storeInput
+      ? (storeInput as { store: SQLiteAuthorizationStore | BoundAuthorizationIdStore }).store
+      : storeInput;
+
+  assertStoreHealthForCancellation(store);
+
+  const authValidation = validateAuthorizationId(authorizationIdInput);
+  if (!authValidation.ok) {
+    return false;
+  }
+
+  if (store && typeof (store as SQLiteAuthorizationStore).cancelAuthorization === "function") {
+    return (store as SQLiteAuthorizationStore).cancelAuthorization(authValidation.id);
+  }
+
+  return false;
+}
+
+export const cancelSignedTransactionAuthorizationV3 = cancelAuthorization;

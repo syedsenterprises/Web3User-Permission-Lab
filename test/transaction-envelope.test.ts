@@ -141,4 +141,18 @@ describe("Transaction authorization envelope", () => {
 
     expect(matchesTransactionEnvelope(forged, request)).toBe(false);
   });
+
+  it("enforces calldata length boundaries (Item 4)", () => {
+    // 131074 characters = '0x' + 131072 hex characters
+    const maxCalldata = "0x" + "bb".repeat(65536);
+    const validRes = createTransactionEnvelope({ ...request, calldata: maxCalldata });
+    expect(validRes.ok).toBe(true);
+
+    const oversized = maxCalldata + "00";
+    const overRes = createTransactionEnvelope({ ...request, calldata: oversized });
+    expect(overRes.ok).toBe(false);
+    if (!overRes.ok) {
+      expect(overRes.reason).toBe("Calldata exceeds maximum allowed length of 131074 characters.");
+    }
+  });
 });

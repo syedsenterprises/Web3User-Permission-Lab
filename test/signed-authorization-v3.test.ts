@@ -1188,22 +1188,24 @@ describe("Milestone 6.2 Phase 3: V3 Canonical Signing, Issuance & Consumption Pi
         },
       };
       const racingStore = new SQLiteAuthorizationStore(dbFile, racingClock);
-      triggerRace = true;
+      try {
+        triggerRace = true;
 
-      // When racingStore calls consumeSignedTransactionAuthorizationV3:
-      // Initial snapshot is 1050 (< 1100).
-      // Inside transaction, it derives effectiveNowSeconds = max(1050, 1150) = 1150.
-      // Since 1150 >= artifact.expiresAtSeconds (1100), consumption MUST BE DENIED with expiry reason!
-      const consumeRes = consumeSignedTransactionAuthorizationV3(
-        racingStore,
-        issueRes.artifact,
-        issueRes.envelope,
-        validRequest,
-      );
-      expect(consumeRes.decision).toBe("DENY");
-      expect(consumeRes.reasons).toContain("Signed transaction authorization has expired.");
-
-      racingStore.close();
+        // When racingStore calls consumeSignedTransactionAuthorizationV3:
+        // Initial snapshot is 1050 (< 1100).
+        // Inside transaction, it derives effectiveNowSeconds = max(1050, 1150) = 1150.
+        // Since 1150 >= artifact.expiresAtSeconds (1100), consumption MUST BE DENIED with expiry reason!
+        const consumeRes = consumeSignedTransactionAuthorizationV3(
+          racingStore,
+          issueRes.artifact,
+          issueRes.envelope,
+          validRequest,
+        );
+        expect(consumeRes.decision).toBe("DENY");
+        expect(consumeRes.reasons).toContain("Signed transaction authorization has expired.");
+      } finally {
+        racingStore.close();
+      }
 
       // Verify authorization record in database remains in 'issued' state (was not consumed)
       const record = store1.getAuthorizationRecord("auth-toctou-race");
@@ -1501,6 +1503,181 @@ describe("Milestone 6.2 Phase 3: V3 Canonical Signing, Issuance & Consumption Pi
       expect(record?.artifactVersion).toBe(3);
     } finally {
       store.close();
+    }
+  });
+
+  // 24. Failure injection: mid-transaction failure rolls back partial writes, preserves original error, and reverts in-transaction clock advance
+  it("rolls back partial writes, preserves original error, and reverts in-transaction clock advance on failure", () => {
+    const dbFile = databasePath();
+    const { authStore, policyStore, keyStore, clock } = setupStores(dbFile, 1000);
+    const key = createKeypair();
+
+    try {
+      policyStore.registerPolicy(validPolicy); // Revision 1
+      keyStore.registerKey({ keyId: "key-v3-failure-test", publicKey: key.publicKey, status: "active" });
+
+      // Persisted high-water mark starts at 1000
+      const getHwMark = () => {
+        const rawDb = new DatabaseSync(dbFile);
+        try {
+          return (
+            rawDb.prepare("SELECT high_water_seconds FROM system_clock_state WHERE id = 1").get() as {
+              high_water_seconds: number;
+            }
+          ).high_water_seconds;
+        } finally {
+          rawDb.close();
+        }
+      };
+
+      expect(getHwMark()).toBe(1000);
+
+      // Part A: Issuance failure after in-transaction clock advance rolls back high-water mark
+      clock.set(1500);
+
+      // A1. Soft failure (unknown policy) encountered after high-water advance in BEGIN IMMEDIATE
+      const issueSoftFail = issueSignedTransactionAuthorizationV3(
+        authStore,
+        { keyId: "key-v3-failure-test", privateKey: key.privateKey },
+        "auth-fail-soft",
+        "policy-does-not-exist",
+        validRequest,
+      );
+      expect(issueSoftFail.decision).toBe("DENY");
+      expect(issueSoftFail.reasons).toContain("Policy 'policy-does-not-exist' not found.");
+      // Clock advance inside the rolled-back transaction must revert
+      expect(getHwMark()).toBe(1000);
+      expect(authStore.getAuthorizationRecord("auth-fail-soft")).toBeNull();
+
+      // A2. Hard unhandled DB error during INSERT into consumed_authorization_ids
+      const triggerDb1 = new DatabaseSync(dbFile);
+      try {
+        triggerDb1.exec(`
+          CREATE TRIGGER abort_auth_insert
+          BEFORE INSERT ON consumed_authorization_ids
+          BEGIN
+            SELECT RAISE(ABORT, 'injected authorization insert abort');
+          END;
+        `);
+      } finally {
+        triggerDb1.close();
+      }
+
+      expect(() => {
+        issueSignedTransactionAuthorizationV3(
+          authStore,
+          { keyId: "key-v3-failure-test", privateKey: key.privateKey },
+          "auth-fail-hard",
+          "policy-v3-alpha",
+          validRequest,
+        );
+      }).toThrow(/injected authorization insert abort/);
+
+      // High-water mark still rolled back to 1000, no partial records
+      expect(getHwMark()).toBe(1000);
+      expect(authStore.getAuthorizationRecord("auth-fail-hard")).toBeNull();
+
+      // Cleanup insert trigger
+      const cleanupDb1 = new DatabaseSync(dbFile);
+      try {
+        cleanupDb1.exec("DROP TRIGGER abort_auth_insert;");
+      } finally {
+        cleanupDb1.close();
+      }
+
+      // Legitimate issuance at t=1500 now succeeds and commits high-water mark to 1500
+      const legitIssue = issueSignedTransactionAuthorizationV3(
+        authStore,
+        { keyId: "key-v3-failure-test", privateKey: key.privateKey },
+        "auth-legit-v3",
+        "policy-v3-alpha",
+        validRequest,
+      );
+      expect(legitIssue.decision).toBe("ALLOW");
+      if (legitIssue.decision !== "ALLOW") return;
+      expect(getHwMark()).toBe(1500);
+      expect(authStore.getAuthorizationRecord("auth-legit-v3")?.state).toBe("issued");
+
+      // Part B: Consumption failure after in-transaction clock advance rolls back high-water mark and preserves 'issued' state
+      // (Default TTL is 300s, so legitIssue expires at 1500 + 300 = 1800)
+      clock.set(1600);
+
+      // B1. Soft failure (tampered calldata / request mismatch) encountered after high-water advance
+      const tamperedRequest: TransactionRequest = {
+        ...validRequest,
+        calldata: validRequest.calldata.slice(0, -4) + "beef",
+      };
+
+      const consumeSoftFail = consumeSignedTransactionAuthorizationV3(
+        authStore,
+        legitIssue.artifact,
+        legitIssue.envelope,
+        tamperedRequest,
+      );
+      expect(consumeSoftFail.decision).toBe("DENY");
+      expect(consumeSoftFail.reasons).toContain(
+        "Transaction does not match the original envelope."
+      );
+      // High-water mark remains 1500 (reverted from 1600)
+      expect(getHwMark()).toBe(1500);
+      // Authorization record remains 'issued' (NOT 'consumed', and consumed_at remains null)
+      const recAfterSoftFail = authStore.getAuthorizationRecord("auth-legit-v3");
+      expect(recAfterSoftFail?.state).toBe("issued");
+      expect(recAfterSoftFail?.consumedAt).toBeNull();
+
+      // B2. Hard unhandled DB error during UPDATE of consumed_authorization_ids
+      clock.set(1650);
+      const triggerDb2 = new DatabaseSync(dbFile);
+      try {
+        triggerDb2.exec(`
+          CREATE TRIGGER abort_auth_update
+          BEFORE UPDATE OF state ON consumed_authorization_ids
+          BEGIN
+            SELECT RAISE(ABORT, 'injected authorization update abort');
+          END;
+        `);
+      } finally {
+        triggerDb2.close();
+      }
+
+      expect(() => {
+        consumeSignedTransactionAuthorizationV3(
+          authStore,
+          legitIssue.artifact,
+          legitIssue.envelope,
+          validRequest,
+        );
+      }).toThrow(/injected authorization update abort/);
+
+      // High-water mark remains 1500 (reverted from 1650)
+      expect(getHwMark()).toBe(1500);
+      const recAfterHardFail = authStore.getAuthorizationRecord("auth-legit-v3");
+      expect(recAfterHardFail?.state).toBe("issued");
+      expect(recAfterHardFail?.consumedAt).toBeNull();
+
+      // Cleanup update trigger
+      const cleanupDb2 = new DatabaseSync(dbFile);
+      try {
+        cleanupDb2.exec("DROP TRIGGER abort_auth_update;");
+      } finally {
+        cleanupDb2.close();
+      }
+
+      // Legitimate consumption at t=1700 now succeeds (< 1800 expiry) and commits state to 'consumed' and high-water to 1700
+      clock.set(1700);
+      const legitConsume = consumeSignedTransactionAuthorizationV3(
+        authStore,
+        legitIssue.artifact,
+        legitIssue.envelope,
+        validRequest,
+      );
+      expect(legitConsume.decision).toBe("ALLOW");
+      expect(getHwMark()).toBe(1700);
+      const finalRec = authStore.getAuthorizationRecord("auth-legit-v3");
+      expect(finalRec?.state).toBe("consumed");
+      expect(finalRec?.consumedAt).not.toBeNull();
+    } finally {
+      authStore.close();
     }
   });
 });
