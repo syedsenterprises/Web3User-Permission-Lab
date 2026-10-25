@@ -1,7 +1,18 @@
 {
   "name": "web3user-permission-lab",
   "version": "0.1.0-rc.1",
+  "description": "Off-chain authorization and policy governance engine with SQLite persistence, Ed25519 signed artifacts, and atomic single-use replay protection for Web3 actions",
   "private": true,
+  "license": "Apache-2.0",
+  "author": "Syed Shahed",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/syedsenterprises/Web3User-Permission-Lab.git"
+  },
+  "bugs": {
+    "url": "https://github.com/syedsenterprises/Web3User-Permission-Lab/issues"
+  },
+  "homepage": "https://github.com/syedsenterprises/Web3User-Permission-Lab#readme",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

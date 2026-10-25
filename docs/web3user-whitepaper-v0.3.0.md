@@ -395,9 +395,9 @@ To reproduce the verification results reported in this white paper:
 
 ```bash
 # Navigate to repository root
-cd C:\Users\syeds\Projects\Web3User
+cd /path/to/Web3User
 
-# Execute full automated test suite (238 tests across 14 files)
+# Execute full automated test suite (332 tests across 17 test suites)
 npm test
 
 # Verify static TypeScript type checking
