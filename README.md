@@ -31,7 +31,7 @@ npm run build
 npm pack
 
 # In your consumer project:
-npm install /path/to/web3user-permission-lab-0.1.0.tgz
+npm install /path/to/web3user-permission-lab-0.1.0-rc.1.tgz
 ```
 
 ### Minimal Example
