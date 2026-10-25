@@ -1,9 +1,22 @@
 # Web3User Permission Lab
 
-Early-stage starter scaffold for the Web3User Protocol MVP.
+Web3User Permission Lab is an early-stage **off-chain transaction authorization and policy-governance SDK** for Node.js (`>=22.13.0`) with zero third-party runtime dependencies.
+
+Designed for transaction relayers, wallet middleware, and dApp backends, Web3User provides pre-execution governance:
+1. Evaluates candidate transaction proposals against authoritative in-database governance policies.
+2. Generates versioned, tamper-evident authorization artifacts using Ed25519 digital signatures.
+3. Enforces persistent, single-use replay prevention backed by SQLite Write-Ahead Logging (WAL) and monotonic timekeeping.
+
+> [!IMPORTANT]
+> **Off-Chain Scope & Boundaries:**
+> Web3User is an off-chain decision engine, not an on-chain smart contract, blockchain validator, or transaction broadcaster.
+> - The SDK validates candidate transaction parameters against declarative rules and records persistent single-use reservations in local SQLite storage.
+> - The SDK does **not** sign Ethereum transactions with wallet keys (secp256k1), submit RPC requests to nodes, manage mempool broadcasts, estimate gas, manage nonces, or custody assets.
+> - An `ALLOW` decision indicates off-chain policy compliance; it does **not** constitute blockchain execution or funds movement. The integrating relayer or application remains responsible for separate wallet-signing and RPC broadcast.
 
 ## Status
-Local-first prototype scaffold only. It is not deployed, audited, or an onchain enforcement mechanism.
+
+Development-stage preview and release candidate (`v0.1.0-rc.1`). This software is a local-first reference implementation intended for evaluation, integration testing, and research. It has not undergone an independent external security audit and makes no claim of formal verification or production readiness.
 
 ## Requirements
 - Node.js 22.13.0 or later. The persistent SQLite store uses the built-in `node:sqlite` module, which was added in Node.js 22.5.0 and is available without an experimental flag starting in 22.13.0.
@@ -168,8 +181,15 @@ The demo database is stored at `.demo-data/bound-authorization-replay.sqlite` in
 
 This is a local authorization demonstration only. An `ALLOW` result does not mean a transaction was signed, submitted, or executed. The demo does not connect to a wallet, interact with a blockchain, move funds, or provide a production deployment.
 
-## Scope
-Deterministic demo checks for an allowlisted target and function selector, maximum amount, validity window, revocation, and unknown inputs.
+## Scope and Supported Transactions
 
-## Safety
-This is an off-chain simulator. It does not block or authorize blockchain transactions. Do not connect real funds or use it as a security control.
+- **Supported Transaction Format**: Currently restricted to the standard ERC-20 `transfer(address,uint256)` function selector (`0xa9059cbb`) with exactly 68 bytes of calldata (4-byte selector and two 32-byte ABI arguments). Other selectors, arbitrary contract calls, or malformed encodings return `UNKNOWN` or `DENY`.
+- **Policy Allowlisting**: Enforces case-insensitive address allowlists for the ERC-20 token contract (`allowedTarget`) and the recipient (`allowedRecipient`).
+- **Spending Limits Boundary**: Enforces an inclusive per-action maximum transfer amount (`maxAmount`). It does **not** provide cumulative, aggregate, or rolling time-window spending budgets across multiple transactions.
+- **Authority and Invalidation**: V3 authorizations bind the authoritative policy revision and issuer key state in SQLite. Restoring or modifying a policy increments its revision and permanently invalidates prior authorizations.
+
+## Safety and Operational Boundaries
+
+- **Not an On-Chain Enforcer**: Web3User operates strictly off-chain. It does not monitor mempools, intercept RPC traffic, or communicate directly with blockchain consensus. Callers must fail closed on `DENY` or `UNKNOWN` and must verify authorization before requesting user wallet signatures.
+- **Durable Local Storage Required**: SQLite WAL mode requires shared memory (`-shm`) and POSIX byte-range file locking. Network filesystems (NFS, SMB/CIFS, AWS EFS) are strictly unsupported and risk database corruption or `SQLITE_BUSY` errors. The database must reside on directly attached local block storage.
+- **Pre-Release Audit Notice**: This release candidate is not audited for production deployment. Do not use it as the sole security control for high-value mainnet treasuries or unmonitored autonomous execution.
