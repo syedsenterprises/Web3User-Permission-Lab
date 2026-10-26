@@ -12,6 +12,11 @@ It returns one of three decisions:
 
 An `ALLOW` result is not transaction execution or an on-chain guarantee. It represents solely an off-chain authorization decision indicating policy compliance and recording an atomic single-use reservation in SQLite.
 
+**Core Invariants and Operational Realities:**
+- **Durable Consumption**: Once consumed in SQLite (`state = 'consumed'`), the authorization transition is durable and permanent. If downstream blockchain broadcasting fails, reverts on-chain, or is dropped from the mempool, the SDK does **not** automatically roll back or reverse the consumption.
+- **Per-Action Ceiling vs. Cumulative Budget**: `maxAmount` is an inclusive per-action ceiling for a single transaction. It does not enforce a cumulative, aggregate, or rolling time-window spending budget across multiple transactions.
+- **Local Block Storage Only**: SQLite WAL mode requires POSIX advisory file locking and shared memory (`-shm`). Network-mounted storage (such as NFS, SMB/CIFS, AWS EFS, Azure Files, or GlusterFS) is strictly unsupported due to locking desynchronization and corruption hazards.
+
 ## 2. Supported Transaction Format
 
 The evaluator supports only the ERC-20 function:
@@ -82,6 +87,14 @@ An `ALLOW` decision confirms policy compliance and marks the authorization
 consumed off-chain; the external caller / relayer remains responsible for
 obtaining the wallet's EVM transaction signature (secp256k1) and submitting
 the signed transaction to an Ethereum RPC node.
+
+**Durable Consumption Semantics**:
+Consumption transitions the authorization state in SQLite from `issued` to `consumed` permanently.
+If the subsequent downstream blockchain transaction fails to broadcast, times out in the mempool,
+reverts on-chain, or is replaced, the consumed state in SQLite is **not** automatically reversed,
+restored, or rolled back. Relayers and integrating applications must treat consumption as a
+one-way reservation and manage downstream broadcast failures at the application layer by
+requesting a fresh authorization under a new authorization ID.
 
 The evaluator's inputs and result must not be trusted if an attacker can
 alter them between evaluation and execution.
@@ -253,9 +266,9 @@ coordination, production durability, or production security.
 Passing these tests does not constitute a security audit, formal
 verification, or proof of production readiness.
 
-## 10. Milestone 6.4 Security Model: Asymmetric Signatures, Governance, and Recovery Invariants
+## 10. Milestone 6.4+ / V3 Security Architecture: Asymmetric Signatures, Governance, and Recovery Invariants
 
-Milestone 6.4 represents the current locally validated security architecture (working tree verified on top of commit `f1bed7f51e6a3ccb024b17a86993faf07bc48349`, unpublished), consolidating the security architecture beyond the unkeyed binding digests of Milestone 5B. The system implements cryptographic issuer authenticity, authoritative in-database governance, transactional monotonic timekeeping, safe integer arithmetic, and verified crash-recovery invariants.
+The Version 3 security architecture (active in release candidate `v0.1.0-rc.1` and `main`) consolidates the security model beyond the unkeyed binding digests of Milestone 5B. The system implements cryptographic issuer authenticity, authoritative in-database governance, transactional monotonic timekeeping, safe integer arithmetic, and verified crash-recovery invariants.
 
 ### 10.1 V3 Signed Authorization Artifacts and Canonical Serialization
 
@@ -319,6 +332,7 @@ Persistent replay protection is implemented via SQLite in Write-Ahead Logging (W
   WHERE authorization_id = ? AND binding_digest = ? AND state = 'issued' AND artifact_version = 3;
   ```
 - If the record does not exist in `state = 'issued'`, has already been consumed, or contains a mismatched digest/version, `UPDATE` modifies 0 rows and consumption fails closed with `DENY`.
+- **Durable Consumption & No Downstream Reversal**: Consumption is durable and permanent in SQLite. Once an authorization transitions to `state = 'consumed'`, it is not automatically reversed, restored, or rolled back if the downstream blockchain transaction fails, reverts on-chain, or is dropped from the mempool. Relayers must handle transaction broadcast failures by requesting a fresh authorization under a new authorization ID.
 
 ### 10.6 Transaction-Locked Monotonic System Clock and Rollback Detection
 
@@ -439,10 +453,10 @@ Milestone 6.8 Phase 1 implements a defense-in-depth clock guardrail architecture
    - The in-memory candidate sample is published (`guard.publishCandidate()`) *only after confirmed successful `COMMIT;`*.
    - If business evaluation fails or SQLite mutations throw, the transaction executes `ROLLBACK;` and the candidate sample is discarded without updating local published state.
 
-4. **Multi-Process High-Water Invariant**:
+4. **Multi-Process High-Water Invariant & Host Clock Synchronization**:
    - Across multiple worker processes sharing a single SQLite database, a process's local published sample may lag behind the authoritative shared SQLite high-water mark ($\text{localPublishedSample} \le \text{sqlite.high\_water\_seconds}$).
    - If another worker advances SQLite high-water beyond worker A's current clock, worker A's subsequent candidate timestamp below high-water is rejected with `Clock rollback detected` without tripping worker A's in-memory anchor. Once worker A's clock reaches or exceeds the shared high-water mark, operations proceed normally.
-   - **NTP Synchronization Target**: To minimize spurious rollback detections between concurrent workers sharing a database, host nodes should run an active NTP daemon (`chrony` or `systemd-timesyncd`). Maintaining clock synchronization within an operational target of ~100ms across hosts is a recommended deployment practice, rather than a formal mathematical theorem or library guarantee.
+   - **Host Clock Synchronization Requirements**: Because `ClockGuard` enforces monotonic time progression in integer seconds relative to the shared SQLite `high_water_seconds`, any worker whose local wall clock evaluates a timestamp prior to the current high-water mark will be denied (`Clock rollback detected`). Host nodes should run an active, continuous NTP daemon (`chrony` or `systemd-timesyncd`). While active NTP synchronization (e.g., maintaining an operational target of ~100ms) significantly reduces the likelihood of interleaving collisions between distributed workers, no sub-second offset (such as 50 ms or 100 ms) constitutes a universally guaranteed safe threshold against rollback rejections, as worker scheduling, transaction delays, and integer-second truncation can still surface transient discrepancies.
 
 5. **Fatal Tainted-Connection Invariant**:
    - If SQLite `COMMIT;` throws or produces an uncertain outcome, the connection is treated as permanently compromised.

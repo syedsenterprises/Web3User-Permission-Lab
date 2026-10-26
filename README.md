@@ -13,6 +13,8 @@ Designed for transaction relayers, wallet middleware, and dApp backends, Web3Use
 > - The SDK validates candidate transaction parameters against declarative rules and records persistent single-use reservations in local SQLite storage.
 > - The SDK does **not** sign Ethereum transactions with wallet keys (secp256k1), submit RPC requests to nodes, manage mempool broadcasts, estimate gas, manage nonces, or custody assets.
 > - An `ALLOW` decision indicates off-chain policy compliance; it does **not** constitute blockchain execution or funds movement. The integrating relayer or application remains responsible for separate wallet-signing and RPC broadcast.
+> - **Durable Consumption**: Authorization consumption is durable and permanent in SQLite (`state = 'consumed'`). It is **not** automatically reversed or restored if downstream blockchain broadcasting fails, reverts on-chain, or is dropped from the mempool.
+> - **Per-Action Ceiling**: `maxAmount` is strictly an inclusive per-action ceiling for a single transaction, not a cumulative or rolling spending budget across multiple transactions.
 
 ## Status
 
@@ -109,8 +111,10 @@ if (issueResult.decision === "ALLOW") {
 
   if (consumeResult.decision === "ALLOW") {
     // Note: ALLOW confirms policy compliance and marks the authorization consumed
-    // in SQLite. The external caller / relayer remains responsible for signing the
-    // EVM transaction with an Ethereum wallet key (secp256k1) and broadcasting to an RPC node.
+    // in SQLite. This reservation is durable and is not automatically reversed if
+    // downstream blockchain execution fails, reverts on-chain, or is dropped from the mempool.
+    // The external caller / relayer remains responsible for signing the EVM transaction with
+    // an Ethereum wallet key (secp256k1) and broadcasting to an RPC node.
     console.log("Authorization granted off-chain. Ready for wallet signing and RPC broadcast.");
   }
 
@@ -129,7 +133,7 @@ engine.close();
 ### Decision Semantics
 
 The engine strictly returns one of three decisions:
-- **`ALLOW`**: The transaction request satisfies authoritative policy rules, signing key validity intervals, and timestamp guardrails. A persistent single-use reservation was recorded atomically in SQLite. This represents an off-chain authorization outcome, not an on-chain execution or transaction broadcast.
+- **`ALLOW`**: The transaction request satisfies authoritative policy rules, signing key validity intervals, and timestamp guardrails. A persistent single-use reservation was recorded atomically in SQLite. This represents an off-chain authorization outcome, not an on-chain execution or transaction broadcast. **Consumption is durable and irreversible**: once consumed in SQLite, the authorization cannot be reused and is not automatically restored or reversed if downstream blockchain execution fails, reverts, or is dropped from the mempool.
 - **`DENY`**: The request violates policy bounds (e.g. transfer limit exceeded, disallowed target/selector), references a revoked/retired key or policy, has expired, or has already been consumed (replay attack).
 - **`UNKNOWN`**: The candidate calldata or request structure is malformed or cannot be safely parsed into a valid transaction envelope.
 
@@ -145,7 +149,7 @@ The engine strictly returns one of three decisions:
 
 ### SQLite Durability, Checkpointing & Storage Boundaries
 
-- **Local Storage Requirement**: SQLite WAL mode requires shared memory (`-shm`) and POSIX byte-range file locking. Network filesystems (such as NFS, SMB/CIFS, AWS EFS, or Azure Files) do not reliably implement these primitives and can cause silent corruption, locking deadlocks, or `SQLITE_BUSY` errors. The database must reside on direct, locally attached block storage (e.g. local NVMe/SSD or dedicated cloud block storage like AWS EBS / GCP Persistent Disk mounted locally).
+- **Local Storage Requirement**: SQLite WAL mode requires shared memory (`-shm`) and POSIX byte-range file locking. Network filesystems (such as NFS, SMB/CIFS, AWS EFS, Azure Files, or GlusterFS) do not reliably implement these primitives and can cause silent corruption, locking deadlocks, or `SQLITE_BUSY` errors. The database must reside on direct, locally attached block storage (e.g. local NVMe/SSD or dedicated cloud block storage like AWS EBS / GCP Persistent Disk mounted locally).
 - **WAL & Synchronous FULL**: Every owned connection configures `PRAGMA journal_mode = WAL;` and `PRAGMA synchronous = FULL;` by default.
 - **Checkpointing & WAL Management**:
   - The SDK exposes `engine.storage.checkpoint(mode?: CheckpointMode): CheckpointResult`.
@@ -166,7 +170,9 @@ The engine strictly returns one of three decisions:
   - *Issuer Keys (Ed25519)*: Managed within the SDK (`SQLiteKeyStore`) to sign and verify off-chain V3 authorization artifacts.
   - *Wallet Keys (secp256k1)*: Ethereum private keys used on-chain to sign EVM transactions. The Web3User SDK never handles, stores, or accesses wallet private keys.
 - **Private Key Safety**: Never hardcode private keys in source code. Load private keys from secure environment variables, KMS, or HSMs. The SDK never logs, serializes, or echoes private key material in error messages.
-- **NTP Time Synchronization Target**: To minimize clock-rollback detections across multi-process workers sharing a database, host servers should synchronize via NTP (e.g., `chrony` or `systemd-timesyncd`). Maintaining host clock drift within an operational target of ~100ms is recommended.
+- **Host Clock Synchronization for Multi-Process Deployments**: When multiple worker processes share an SQLite database, `ClockGuard` checks candidate timestamps against the shared SQLite `high_water_seconds`. Any backward step relative to that mark is rejected as a rollback. Host servers should run continuous NTP daemons (`chrony` or `systemd-timesyncd`). While minimizing drift (e.g. keeping clock drift within an operational target of ~100ms) reduces the likelihood of interleaving collisions between distributed workers, no sub-second offset is a universally guaranteed safe threshold under arbitrary scheduling, network latency, or process interleaving.
+- **Per-Action Spending Limits vs. Cumulative Budgets**: `maxAmount` is an inclusive per-action ceiling for a single transaction. It does not enforce a cumulative, aggregate, or rolling time-window spending budget across multiple transactions. Applications requiring cumulative volume caps must enforce them at the application or orchestration layer.
+- **Durable Consumption & Downstream Broadcast Failures**: Authorization consumption transitions the database state to `consumed` permanently. If the subsequent blockchain transaction reverts on-chain, fails to broadcast, or is dropped from the mempool, Web3User does not automatically roll back or reverse the consumption. Relayers must manage transaction failures by requesting a fresh authorization under a new authorization ID.
 - **Privileged Store Access**: `engine.getStore()` is provided strictly for administrative maintenance and diagnostics. Executing raw SQL directly on the underlying connection bypasses engine validations and ClockGuard safeguards.
 
 ## Persistent replay demonstration
@@ -191,5 +197,7 @@ This is a local authorization demonstration only. An `ALLOW` result does not mea
 ## Safety and Operational Boundaries
 
 - **Not an On-Chain Enforcer**: Web3User operates strictly off-chain. It does not monitor mempools, intercept RPC traffic, or communicate directly with blockchain consensus. Callers must fail closed on `DENY` or `UNKNOWN` and must verify authorization before requesting user wallet signatures.
-- **Durable Local Storage Required**: SQLite WAL mode requires shared memory (`-shm`) and POSIX byte-range file locking. Network filesystems (NFS, SMB/CIFS, AWS EFS) are strictly unsupported and risk database corruption or `SQLITE_BUSY` errors. The database must reside on directly attached local block storage.
+- **Durable Local Storage Required**: SQLite WAL mode requires shared memory (`-shm`) and POSIX byte-range file locking. Network filesystems (NFS, SMB/CIFS, AWS EFS, Azure Files, GlusterFS) are strictly unsupported and risk database corruption, locking deadlocks, or `SQLITE_BUSY` errors. The database must reside on directly attached local block storage.
+- **Durable Consumption Without Automatic Reversal**: An `ALLOW` consumption reservation is durable and permanent in SQLite (`state = 'consumed'`). It is not automatically reversed if downstream on-chain broadcasting fails, times out, reverts, or is dropped from the mempool.
+- **Per-Action Limit Only**: `maxAmount` bounds each individual action and does not limit cumulative multi-transaction spending.
 - **Pre-Release Audit Notice**: This release candidate is not audited for production deployment. Do not use it as the sole security control for high-value mainnet treasuries or unmonitored autonomous execution.

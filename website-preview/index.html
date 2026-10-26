@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Web3User Permission Lab is a development-stage prototype exploring explicit, testable policy checks for Web3 transaction authorization.">
 <meta name="theme-color" content="#101a2c">
-<title>Web3User Permission Lab — Development Preview</title>
+<title>Web3User Permission Lab &mdash; Development Preview</title>
+<link rel="stylesheet" href="css/demo.css">
 <style>
 :root{color-scheme:dark;--bg:#0b1220;--panel:#111d30;--line:#263752;--text:#eef4ff;--muted:#a7b6cc;--cyan:#71e2d0;--blue:#89b4ff;--gold:#ffd48a;--green:#7ce38b}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#182a45 0,transparent 45%),var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
@@ -36,57 +37,58 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
 </head>
 <body>
 <header class="wrap nav">
-  <div class="brand">◈ Web3User Permission Lab</div>
-  <span class="pill">DEVELOPMENT PREVIEW · Milestone 6.4</span>
+  <div class="brand">&#9672; Web3User Permission Lab</div>
+  <span class="pill">DEVELOPMENT PREVIEW &middot; v0.1.0-rc.1</span>
 </header>
 <main class="wrap">
 <section class="hero">
   <div class="eyebrow">Explicit permissions for Web3 actions</div>
   <h1>Make transaction rules easier to inspect, test, and reason about.</h1>
-  <p>Web3User Permission Lab is an experimental development prototype exploring how proposed blockchain actions can be checked against explicit, testable policies before authorization. The current codebase supports a narrow ERC-20 transfer policy evaluator with cryptographic authorization binding and persistent SQLite replay protection—not a universal wallet or production enforcement system.</p>
+  <p>Web3User Permission Lab is an experimental, off-chain transaction authorization SDK for Node.js exploring how proposed blockchain actions can be checked against explicit, testable policies before execution. The current codebase is an in-process Node.js library supporting an ERC-20 transfer policy evaluator with cryptographic authorization binding and persistent SQLite replay protection&mdash;not a hosted API, cloud service, universal wallet, or production security product.</p>
   <div class="actions">
-    <a class="btn primary" href="assets/web3user-whitepaper-v0.3.0.pdf">Read the white paper (PDF v0.3.0)</a>
-    <a class="btn" href="assets/web3user-project-mindmap-v0.3.0.pdf">Open project mindmap (v0.3.0)</a>
+    <a class="btn primary" href="#demo">Interactive Policy Playground</a>
+    <a class="btn" href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Read the white paper (PDF v0.3.0)</a>
+    <a class="btn" href="assets/web3user-project-mindmap-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Open project mindmap (v0.3.0)</a>
   </div>
 </section>
 
 <div class="notice">
-  <strong>Development-stage notice:</strong> This project is an experimental prototype and has not been independently security-audited. Passing automated test suites is not a substitute for formal security verification or third-party audits. The prototype does not sign, submit, broadcast, or enforce transactions on-chain. Do not use it to protect real funds or authorize production transactions.
+  <strong>Development-stage notice:</strong> Web3User is an off-chain decision SDK, not a smart contract, blockchain validator, or transaction broadcaster. This static preview site is purely an informational document, not a functioning backend, hosted API, or interactive wallet playground. The prototype has not undergone an independent commercial security audit. Do not use it to protect real funds or authorize production transactions.
 </div>
 
 <section>
   <div class="checkpoint-box">
     <div class="checkpoint-header">
-      <div class="checkpoint-title">Current Development Milestone: Milestone 6.4 — Post-Commit Security &amp; Crash-Recovery Validation</div>
-      <span class="checkpoint-tag">LOCAL CHECKPOINT VERIFIED</span>
+      <div class="checkpoint-title">Current Release Candidate: v0.1.0-rc.1 &mdash; Off-Chain Authorization SDK</div>
+      <span class="checkpoint-tag">v0.1.0-rc.1 VERIFIED</span>
     </div>
     <div class="checkpoint-grid">
       <div class="stat-item">
-        <div class="stat-label">Local Commit</div>
-        <div class="stat-code">f1bed7f51e6a3ccb024b17a86993faf07bc48349</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">fix: harden authorization lifecycle concurrency and governance</div>
+        <div class="stat-label">Verified Commit (main)</div>
+        <div class="stat-code">30a4890b16a1e1e8c33c8efe03d7edd28e7806ae</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">test: increase Vitest timeouts for CI stability</div>
       </div>
       <div class="stat-item">
-        <div class="stat-label">Parent Commit &amp; Status</div>
-        <div class="stat-code">763d3b8561c37c340cbdabd39615eece1e4fe8ed</div>
-        <div style="font-size:0.8rem;color:var(--gold);margin-top:2px;">M0–M6.3 complete · M6.4 locally validated in working tree · Unpublished</div>
+        <div class="stat-label">Release Candidate Tag</div>
+        <div class="stat-code">v0.1.0-rc.1 (ea52832)</div>
+        <div style="font-size:0.8rem;color:var(--gold);margin-top:2px;">Tagged commit: ea528326d514e46f1c93ab9d3f4c762b4e073730</div>
       </div>
       <div class="stat-item">
-        <div class="stat-label">Automated Test Verification</div>
-        <div class="stat-val" style="color:var(--green);">238 passed (14 test files)</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">TypeScript typecheck clean (npx tsc --noEmit)</div>
+        <div class="stat-label">Hosted CI Matrix Result</div>
+        <div class="stat-val" style="color:var(--green);">332/332 passed (17 test files)</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">GitHub Actions run 40220716038 across Node.js 22, 24, and 26</div>
       </div>
       <div class="stat-item">
         <div class="stat-label">Persistent Replay Protection</div>
-        <div class="stat-val" style="color:var(--cyan);">Verified via isolated runner</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Step 1: ALLOW on fresh DB · Step 2: DENY on replay</div>
+        <div class="stat-val" style="color:var(--cyan);">Verified via SQLite WAL store</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Step 1: ALLOW on fresh DB &middot; Step 2: DENY on replay</div>
       </div>
     </div>
   </div>
 </section>
 
 <section>
-  <h2>Milestone 6.4 Security &amp; Recovery Validation Implemented</h2>
+  <h2>Milestone 6 Security &amp; Durability Invariants Implemented</h2>
   <div class="grid">
     <article class="card">
       <h3>Multi-Process Race &amp; Replay Prevention</h3>
@@ -120,19 +122,19 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
   <div class="grid">
     <article class="card">
       <h3>Implemented in Prototype</h3>
-      <p>• ERC-20 <code>transfer(address,uint256)</code> policy evaluator.<br>
-      • Exact canonical binding digests (calldata, recipient, amount, chain ID, sender).<br>
-      • Ed25519 V3 signed authorization artifacts with length-prefixed encoding.<br>
-      • Monotonic policy revisions &amp; key registry governance in SQLite.<br>
-      • Persistent two-phase replay protection (<code>issued</code> → <code>consumed</code>).</p>
+      <p>&bull; ERC-20 <code>transfer(address,uint256)</code> policy evaluator.<br>
+      &bull; Exact canonical binding digests (calldata, recipient, amount, chain ID, sender).<br>
+      &bull; Ed25519 V3 signed authorization artifacts with length-prefixed encoding.<br>
+      &bull; Monotonic policy revisions &amp; key registry governance in SQLite.<br>
+      &bull; Persistent two-phase replay protection (<code>issued</code> &rarr; <code>consumed</code>).</p>
     </article>
     <article class="card">
       <h3>Planned for Future Milestones</h3>
-      <p>• Universal wallet integration &amp; RPC middleware adapters.<br>
-      • Cumulative multi-transaction spending budgets over time windows.<br>
-      • Arbitrary smart contract function call decoders.<br>
-      • Multi-party threshold key signing and on-chain validator bindings.<br>
-      • Formal external third-party security audits.</p>
+      <p>&bull; Universal wallet integration &amp; RPC middleware adapters.<br>
+      &bull; Cumulative multi-transaction spending budgets over time windows.<br>
+      &bull; Arbitrary smart contract function call decoders.<br>
+      &bull; Multi-party threshold key signing and on-chain validator bindings.<br>
+      &bull; Formal external third-party security audits.</p>
     </article>
   </div>
 </section>
@@ -141,56 +143,191 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
   <h2>Development Roadmap</h2>
   <div class="roadmap">
     <div class="milestone">
-      <div class="id">M0–M3</div>
+      <div class="id">M0&ndash;M3</div>
       <div><strong>Core Foundation, Policy Evaluator, &amp; Initial Tests</strong><p>Evaluator logic, calldata decoding, parameter boundary checks, and test harnesses.</p></div>
       <span class="status">COMPLETE</span>
     </div>
     <div class="milestone">
-      <div class="id">M4–M5</div>
+      <div class="id">M4&ndash;M5</div>
       <div><strong>Canonical Transaction Binding &amp; Persistent Replay Protection</strong><p>Deterministic length-prefixed payload binding and SQLite two-phase state storage.</p></div>
       <span class="status">COMPLETE</span>
     </div>
     <div class="milestone">
-      <div class="id">M6.1–M6.2</div>
+      <div class="id">M6.1&ndash;M6.3</div>
       <div><strong>V3 Ed25519 Signing, Monotonic Revisions, &amp; Safe Migrations</strong><p>Asymmetric artifact signing, authoritative policy revisions, and crash-safe schema evolution.</p></div>
       <span class="status">COMPLETE</span>
     </div>
     <div class="milestone">
-      <div class="id">M6.3</div>
-      <div><strong>Security &amp; Concurrency Hardening</strong><p>Transaction-locked monotonic clock, rollback/expiry guarantees, contention backoff, and 209-test suite.</p></div>
+      <div class="id">M6.4</div>
+      <div><strong>Post-Commit Security &amp; Crash-Recovery Validation</strong><p>Multi-process race barriers, transaction rollback failure injection, safe TTL arithmetic, and process-crash recovery.</p></div>
       <span class="status">COMPLETE</span>
     </div>
     <div class="milestone">
-      <div class="id">M6.4</div>
-      <div><strong>Post-Commit Security &amp; Crash-Recovery Validation (Working Tree Checkpoint)</strong><p>Multi-process race barriers, transaction rollback failure injection, safe TTL arithmetic, process-crash recovery, and 238-test suite. Locally validated subject to documented verification evidence; uncommitted and unpublished.</p></div>
-      <span class="status current">LOCALLY VALIDATED</span>
+      <div class="id">v0.1.0-rc.1</div>
+      <div><strong>Release Candidate 1 &amp; Hosted CI Verification</strong><p>Release candidate packaging, full multi-version CI matrix passing across Node.js 22, 24, and 26 (332/332 tests), and pre-release security review.</p></div>
+      <span class="status current">CURRENT RC</span>
     </div>
     <div class="milestone">
-      <div class="id">M7–M9</div>
+      <div class="id">M7&ndash;M9</div>
       <div><strong>Budgets, Replay Controls, Adversarial Testing, &amp; Independent Review</strong><p>Cumulative budgets, external wallet boundaries, and independent third-party audits before production consideration.</p></div>
       <span class="status planned">PLANNED</span>
     </div>
   </div>
 </section>
 
+<section class="demo-section" id="demo">
+  <div class="demo-header">
+    <div class="eyebrow">Milestone 7 &middot; Interactive Demonstration</div>
+    <h2>Interactive Policy Evaluator Playground</h2>
+    <p>Test real-time off-chain authorization decisions against custom policies and transaction requests. The evaluation logic below executes natively in your browser using pure TypeScript/JavaScript equivalent to <code>src/policy.ts</code>.</p>
+  </div>
+
+  <div class="demo-presets-wrapper">
+    <div class="presets-label">Representative Scenarios (Presets)</div>
+    <div class="demo-presets-grid" id="demo-presets"></div>
+    <div class="preset-description-box" id="preset-description">Loading preset description...</div>
+  </div>
+
+  <div class="demo-workspace">
+    <!-- Policy Card -->
+    <div class="demo-card">
+      <div class="demo-card-title">
+        <span>Governance Policy</span>
+        <span class="demo-badge-sub">Authoritative Rules</span>
+      </div>
+      <div class="form-group">
+        <label for="policy-id">Policy ID</label>
+        <input type="text" id="policy-id" class="form-control" value="usdc-transfer-policy-v1" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="allowed-target">Allowed Target Contract (ERC-20)</label>
+        <input type="text" id="allowed-target" class="form-control" value="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="allowed-recipient">Allowed Recipient Address</label>
+        <input type="text" id="allowed-recipient" class="form-control" value="0x2222222222222222222222222222222222222222" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="max-amount">Max Amount Limit (base-10 uint256 units)</label>
+        <input type="text" id="max-amount" class="form-control" value="1000000000" spellcheck="false">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="valid-from">Valid From (Unix timestamp)</label>
+          <input type="text" id="valid-from" class="form-control" value="1800000000" spellcheck="false">
+        </div>
+        <div class="form-group">
+          <label for="expires-at">Expires At (Unix timestamp)</label>
+          <input type="text" id="expires-at" class="form-control" value="1800086400" spellcheck="false">
+        </div>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="policy-revoked">
+        <label for="policy-revoked">Revoke this policy (admin kill-switch)</label>
+      </div>
+    </div>
+
+    <!-- Proposed Transaction Action Card -->
+    <div class="demo-card">
+      <div class="demo-card-title">
+        <span>Proposed Transaction</span>
+        <span class="demo-badge-sub">Candidate Action</span>
+      </div>
+      <div class="form-group">
+        <label for="action-target">Target Contract Address</label>
+        <input type="text" id="action-target" class="form-control" value="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="action-recipient">Destination Recipient</label>
+        <input type="text" id="action-recipient" class="form-control" value="0x2222222222222222222222222222222222222222" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="action-amount">Claimed Amount (uint256 units)</label>
+        <input type="text" id="action-amount" class="form-control" value="500000000" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="action-calldata">
+          Raw Transaction Calldata (68-byte hex)
+          <button type="button" id="btn-sync-calldata" class="btn-inline" title="Regenerate calldata from recipient and amount">Sync with Amount</button>
+        </label>
+        <textarea id="action-calldata" class="form-control" rows="3" spellcheck="false" style="resize:vertical;"></textarea>
+      </div>
+      <div class="form-group">
+        <label for="eval-timestamp">
+          Evaluation Timestamp (nowSeconds)
+          <button type="button" id="btn-set-now" class="btn-inline" title="Set to current local time">Use Current Time</button>
+        </label>
+        <input type="text" id="eval-timestamp" class="form-control" value="1800000100" spellcheck="false">
+      </div>
+    </div>
+  </div>
+
+  <div class="demo-results-wrapper">
+    <!-- Live Decision Banner -->
+    <div id="demo-decision-banner" class="decision-banner status-allow" role="region" aria-live="polite">
+      <div class="decision-header">
+        <span id="demo-decision-badge" class="decision-badge badge-allow">ALLOW</span>
+        <span class="decision-title">Evaluation Decision</span>
+      </div>
+      <ul id="demo-decision-reasons" class="decision-reasons"></ul>
+    </div>
+
+    <!-- Rule Verification Checklist -->
+    <div class="checklist-container">
+      <h3 class="checklist-title">Evaluator Invariant &amp; Rule Checklist</h3>
+      <ul id="demo-checklist" class="checklist"></ul>
+    </div>
+
+    <!-- Calldata Inspector -->
+    <div class="inspector-card">
+      <div class="inspector-title">Calldata ABI Breakdown Inspector</div>
+      <div id="demo-calldata-display" class="calldata-code-block"></div>
+      <div id="demo-calldata-decoded" class="calldata-decoded-info"></div>
+    </div>
+
+    <!-- Generated TypeScript Integration Code -->
+    <div class="code-generator-card">
+      <div class="code-header">
+        <h4>Copyable Node.js TypeScript Integration</h4>
+        <div>
+          <span id="copy-feedback" style="color:var(--green);font-size:0.8rem;margin-right:8px;font-weight:600;"></span>
+          <button type="button" id="btn-copy-code" class="btn-copy">Copy TypeScript Code</button>
+        </div>
+      </div>
+      <pre class="code-pre"><code id="demo-ts-code"></code></pre>
+    </div>
+
+    <!-- Architecture Boundary Notice -->
+    <div class="arch-boundary-box">
+      <h4>Architectural Boundary Notice</h4>
+      <p><strong>What is running in your browser:</strong> The policy evaluation, ERC-20 transfer calldata decoding, parameter normalization, and rule checks shown above run 100% client-side in pure JavaScript. No data is transmitted to an external server.</p>
+      <p style="margin-top:8px;"><strong>What requires Node.js runtime:</strong> Full cryptographic Ed25519 authorization signing, monotonic ClockGuard anchoring, and persistent single-use replay protection require the Node.js SDK (<code>Web3UserEngine</code>) with built-in SQLite WAL mode. To test multi-process replay attacks and persistent locking on your machine, run <code>npm run demo:persistent-replay</code>.</p>
+    </div>
+  </div>
+</section>
+
 <section>
   <h2>Technical Snapshot</h2>
-  <p class="muted">Language: TypeScript · Tooling: Node.js, npm, Vitest · Storage: SQLite (WAL mode) · Signatures: Ed25519 (node:crypto) · Version Control: Git.</p>
-  <p class="muted">Current supported selector: <code>0xa9059cbb</code> — ERC-20 <code>transfer(address,uint256)</code>. The prototype enforces single-use persistent replay protection for bound authorizations. Cumulative multi-transaction budgets, arbitrary smart contract parsing, and universal wallet enforcement boundaries are not implemented.</p>
+  <p class="muted">Language: TypeScript &middot; Tooling: Node.js (&gt;=22.13.0), npm, Vitest &middot; Storage: SQLite (built-in node:sqlite, WAL mode) &middot; Signatures: Ed25519 (node:crypto) &middot; Version Control: Git &amp; GitHub.</p>
+  <p class="muted">Current supported selector: <code>0xa9059cbb</code> &mdash; ERC-20 <code>transfer(address,uint256)</code>. The prototype enforces single-use persistent replay protection for bound authorizations. Cumulative multi-transaction budgets, arbitrary smart contract parsing, and universal wallet enforcement boundaries are not implemented.</p>
 </section>
 
 <section>
   <h2>Project Documents</h2>
   <ul>
-    <li><a href="assets/web3user-whitepaper-v0.3.0.pdf"><strong>Technical white paper — v0.3.0 (PDF)</strong></a> — Milestone 6.4 Validation Draft (23 October 2026)</li>
-    <li><a href="assets/web3user-project-mindmap-v0.3.0.pdf"><strong>Detailed project mindmap — v0.3.0 (PDF)</strong></a> — Milestone 6.4 Checkpoint</li>
-    <li><a href="assets/web3user-whitepaper-v0.2.0.pdf">Technical white paper — v0.2.0 (PDF)</a> — Historical archival draft (22 October 2026)</li>
-    <li><a href="assets/web3user-project-mindmap-v0.2.0.pdf">Detailed project mindmap — v0.2.0 (PDF)</a> — Historical archival draft</li>
+    <li><a href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer"><strong>Technical white paper &mdash; v0.3.0 (PDF)</strong></a> &mdash; Milestone 6.4 Validation Draft (23 October 2026)</li>
+    <li><a href="assets/web3user-project-mindmap-v0.3.0.pdf" target="_blank" rel="noopener noreferrer"><strong>Detailed project mindmap &mdash; v0.3.0 (PDF)</strong></a> &mdash; Milestone 6.4 Checkpoint</li>
+    <li><a href="assets/web3user-whitepaper-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Technical white paper &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft (22 October 2026)</li>
+    <li><a href="assets/web3user-project-mindmap-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Detailed project mindmap &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft</li>
   </ul>
 </section>
 </main>
 <footer>
-  <div class="wrap">Web3User Permission Lab · Development Preview (Milestone 6.4) · This site is informational and does not provide financial, legal, or security guarantees.</div>
+  <div class="wrap">Web3User Permission Lab &middot; Development Preview (v0.1.0-rc.1) &middot; This site is informational and does not provide financial, legal, or security guarantees.</div>
 </footer>
+<script type="module">
+  import { initDemo } from "./js/demo-ui.js";
+  initDemo(document.getElementById("demo"));
+</script>
 </body>
 </html>
