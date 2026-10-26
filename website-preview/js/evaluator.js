@@ -136,7 +136,11 @@ export function parseAction(input) {
 }
 
 export function decodeTransfer(calldata) {
-  if (typeof calldata !== "string" || calldata.slice(0, 10).toLowerCase() !== ERC20_TRANSFER_SELECTOR) {
+  if (
+    typeof calldata !== "string" ||
+    calldata.length !== 138 ||
+    calldata.slice(0, 10).toLowerCase() !== ERC20_TRANSFER_SELECTOR
+  ) {
     return null;
   }
 

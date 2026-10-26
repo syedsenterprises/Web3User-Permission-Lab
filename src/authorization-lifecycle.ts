@@ -721,9 +721,14 @@ export function issueSignedTransactionAuthorizationV3(
     return deny(err instanceof Error ? err.message : String(err));
   }
 
-  if (!beginImmediateWithRetry(db)) {
+  try {
+    if (!beginImmediateWithRetry(db)) {
+      guard.releaseLock();
+      return deny("Database is busy; transaction contention retry limit exceeded.");
+    }
+  } catch (err) {
     guard.releaseLock();
-    return deny("Database is busy; transaction contention retry limit exceeded.");
+    throw err;
   }
 
   let candidate: ClockCandidate;
@@ -1060,9 +1065,14 @@ export function consumeSignedTransactionAuthorizationV3(
     return deny(err instanceof Error ? err.message : String(err));
   }
 
-  if (!beginImmediateWithRetry(db)) {
+  try {
+    if (!beginImmediateWithRetry(db)) {
+      guard.releaseLock();
+      return deny("Database is busy; transaction contention retry limit exceeded.");
+    }
+  } catch (err) {
     guard.releaseLock();
-    return deny("Database is busy; transaction contention retry limit exceeded.");
+    throw err;
   }
 
   let candidate: ClockCandidate;

@@ -112,7 +112,7 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
   );
 }
 
-function isUint256String(value: unknown): value is string {
+export function isUint256String(value: unknown): value is string {
   if (
     typeof value !== "string" ||
     !UINT.test(value) ||
@@ -232,7 +232,11 @@ export interface DecodedTransfer {
 }
 
 export function decodeTransfer(calldata: string): DecodedTransfer | null {
-  if (calldata.slice(0, 10).toLowerCase() !== ERC20_TRANSFER_SELECTOR) {
+  if (
+    typeof calldata !== "string" ||
+    calldata.length !== 138 ||
+    calldata.slice(0, 10).toLowerCase() !== ERC20_TRANSFER_SELECTOR
+  ) {
     return null;
   }
 

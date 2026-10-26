@@ -104,6 +104,7 @@ export {
   calculateBudgetWindowStart,
   calculateBudgetWindowEnd,
   decodeTransfer,
+  isUint256String,
   normalizeDemoPolicy,
   evaluate,
 } from "./policy.js";

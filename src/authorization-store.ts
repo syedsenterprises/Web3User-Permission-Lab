@@ -265,6 +265,21 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
         tableNames.delete("consumed_authorization_ids_v3");
       }
 
+      if (
+        !tableNames.has("policy_budget_accumulators") &&
+        tableNames.has("policy_budget_accumulators_v2")
+      ) {
+        throw new Error(
+          "Incomplete or ambiguous migration state: canonical table 'policy_budget_accumulators' is missing but staging table 'policy_budget_accumulators_v2' exists. Halting startup to prevent unverified budget reset; manual database inspection required.",
+        );
+      } else if (
+        tableNames.has("policy_budget_accumulators") &&
+        tableNames.has("policy_budget_accumulators_v2")
+      ) {
+        this.resolveBudgetAccumulatorsAmbiguity();
+        tableNames.delete("policy_budget_accumulators_v2");
+      }
+
       // 2. Fresh database setup
       if (!tableNames.has("consumed_authorization_ids")) {
         this.db.exec(`
@@ -467,6 +482,244 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     this.db.exec("DROP TABLE consumed_authorization_ids_v3;");
   }
 
+  private resolveBudgetAccumulatorsAmbiguity(): void {
+    const v2Count = (
+      this.db.prepare(
+        "SELECT COUNT(*) AS c FROM policy_budget_accumulators_v2",
+      ).get() as { c: number }
+    ).c;
+
+    if (v2Count === 0) {
+      this.db.exec("DROP TABLE policy_budget_accumulators_v2;");
+      return;
+    }
+
+    const origCols = (this.db.prepare(
+      "PRAGMA table_info(policy_budget_accumulators)",
+    ).all() as Array<{ name: string }>).map((c) => c.name).sort();
+
+    const v2Cols = (this.db.prepare(
+      "PRAGMA table_info(policy_budget_accumulators_v2)",
+    ).all() as Array<{ name: string }>).map((c) => c.name).sort();
+
+    if (
+      origCols.length !== v2Cols.length ||
+      origCols.some((col, idx) => col !== v2Cols[idx])
+    ) {
+      throw new Error(
+        "Ambiguous migration state: both policy_budget_accumulators and policy_budget_accumulators_v2 exist with conflicting schemas. Halting to preserve data for investigation.",
+      );
+    }
+
+    const origCount = (
+      this.db.prepare(
+        "SELECT COUNT(*) AS c FROM policy_budget_accumulators",
+      ).get() as { c: number }
+    ).c;
+
+    if (origCount !== v2Count) {
+      throw new Error(
+        `Ambiguous migration state: both policy_budget_accumulators (${origCount} rows) and policy_budget_accumulators_v2 (${v2Count} rows) exist with different row counts. Halting to preserve data for investigation.`,
+      );
+    }
+
+    const selectCols = "policy_id, window_type, window_start, spent_amount, last_updated_at";
+    const diff1 = (
+      this.db.prepare(`
+        SELECT ${selectCols} FROM policy_budget_accumulators
+        EXCEPT
+        SELECT ${selectCols} FROM policy_budget_accumulators_v2
+      `).all() as Array<unknown>
+    );
+
+    const diff2 = (
+      this.db.prepare(`
+        SELECT ${selectCols} FROM policy_budget_accumulators_v2
+        EXCEPT
+        SELECT ${selectCols} FROM policy_budget_accumulators
+      `).all() as Array<unknown>
+    );
+
+    if (diff1.length > 0 || diff2.length > 0) {
+      throw new Error(
+        "Ambiguous migration state: both policy_budget_accumulators and policy_budget_accumulators_v2 exist with conflicting row contents. Halting to preserve data for investigation.",
+      );
+    }
+
+    this.db.exec("DROP TABLE policy_budget_accumulators_v2;");
+  }
+
+  private migrateBudgetAccumulators(): void {
+    const columns = this.db.prepare(
+      "PRAGMA table_info(policy_budget_accumulators)",
+    ).all() as Array<{
+      name: string;
+      type: string;
+      notnull: number;
+      pk: number;
+    }>;
+    const colMap = new Map(columns.map((c) => [c.name, c]));
+
+    const masterRow = this.db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'policy_budget_accumulators'",
+    ).get() as { sql: string } | undefined;
+    const tableSql = masterRow?.sql ?? "";
+
+    const fkList = this.db.prepare(
+      "PRAGMA foreign_key_list(policy_budget_accumulators)",
+    ).all() as Array<{
+      table: string;
+      from: string;
+      to: string;
+      on_delete: string;
+    }>;
+
+    // 1. Verify standard composite schema structure common to both M8 and strict M9:
+    // Exactly 5 columns with correct types, NOT NULL constraints, and composite primary key (policy_id, window_type, window_start)
+    const hasExpectedColumns =
+      columns.length === 5 &&
+      colMap.get("policy_id")?.type === "TEXT" &&
+      colMap.get("policy_id")?.notnull === 1 &&
+      colMap.get("policy_id")?.pk === 1 &&
+      colMap.get("window_type")?.type === "TEXT" &&
+      colMap.get("window_type")?.notnull === 1 &&
+      colMap.get("window_type")?.pk === 2 &&
+      colMap.get("window_start")?.type === "INTEGER" &&
+      colMap.get("window_start")?.notnull === 1 &&
+      colMap.get("window_start")?.pk === 3 &&
+      colMap.get("spent_amount")?.type === "TEXT" &&
+      colMap.get("spent_amount")?.notnull === 1 &&
+      colMap.get("spent_amount")?.pk === 0 &&
+      colMap.get("last_updated_at")?.type === "TEXT" &&
+      colMap.get("last_updated_at")?.notnull === 1 &&
+      colMap.get("last_updated_at")?.pk === 0;
+
+    const hasExpectedForeignKey =
+      fkList.length === 1 &&
+      fkList[0].table.toLowerCase() === "policies" &&
+      fkList[0].from.toLowerCase() === "policy_id" &&
+      fkList[0].to.toLowerCase() === "policy_id" &&
+      fkList[0].on_delete.toUpperCase() === "CASCADE";
+
+    const hasExpectedWindowTypeCheck =
+      /window_type\s+IN\s*\(\s*['"]HOURLY['"]\s*,\s*['"]DAILY['"]\s*\)/i.test(tableSql);
+
+    const hasStrictNumericCheck =
+      /length\(spent_amount\)\s*>\s*0/i.test(tableSql) &&
+      /length\(spent_amount\)\s*<=\s*78/i.test(tableSql) &&
+      /NOT\s*\(?\s*spent_amount\s+GLOB\s+['"]\*\[\^0-9\]\*['"]\s*\)?/i.test(tableSql);
+
+    const isStrictSchema =
+      hasExpectedColumns &&
+      hasExpectedForeignKey &&
+      hasExpectedWindowTypeCheck &&
+      hasStrictNumericCheck;
+
+    if (isStrictSchema) {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_budget_accumulators_lookup
+          ON policy_budget_accumulators (policy_id, window_type, window_start);
+      `);
+      return;
+    }
+
+    // 2. Check if the schema matches the recognized supported M8 legacy schema
+    const hasM8NumericCheck =
+      /length\(spent_amount\)\s*<=\s*78/i.test(tableSql) &&
+      /spent_amount\s+GLOB\s+['"]\[0-9\]\*['"]/i.test(tableSql) &&
+      !tableSql.includes("*[^0-9]*");
+
+    const isSupportedM8Legacy =
+      hasExpectedColumns &&
+      hasExpectedForeignKey &&
+      hasExpectedWindowTypeCheck &&
+      hasM8NumericCheck;
+
+    if (!isSupportedM8Legacy) {
+      throw new Error(
+        "Cannot migrate policy_budget_accumulators: table schema does not match either the verified strict schema or the supported Milestone 8 legacy schema. Halting startup to prevent data loss or destructive repair; manual database inspection required.",
+      );
+    }
+
+    // 1. Pre-validate every existing spent_amount and row integrity.
+    // If ANY row is malformed, abort initialization with a clear migration error.
+    // Never delete, sanitize, truncate, or reset malformed accumulators.
+    const rows = this.db.prepare(
+      "SELECT policy_id, window_type, window_start, spent_amount FROM policy_budget_accumulators",
+    ).all() as Array<{ policy_id: unknown; window_type: unknown; window_start: unknown; spent_amount: unknown }>;
+
+    const invalidRows: Array<{ policy_id: unknown; window_type: unknown; window_start: unknown; spent_amount: unknown }> = [];
+
+    for (const r of rows) {
+      const isPolicyValid = typeof r.policy_id === "string" && r.policy_id.length > 0;
+      const isWindowTypeValid = r.window_type === "HOURLY" || r.window_type === "DAILY";
+      const isWindowStartValid = typeof r.window_start === "number" && Number.isSafeInteger(r.window_start) && r.window_start >= 0;
+      const isSpentValid =
+        typeof r.spent_amount === "string" &&
+        r.spent_amount.length > 0 &&
+        r.spent_amount.length <= 78 &&
+        /^[0-9]+$/.test(r.spent_amount);
+
+      if (!isPolicyValid || !isWindowTypeValid || !isWindowStartValid || !isSpentValid) {
+        invalidRows.push(r);
+      }
+    }
+
+    if (invalidRows.length > 0) {
+      const sample = invalidRows.slice(0, 3).map(
+        (r) => `(policy_id: '${r.policy_id}', window_type: '${r.window_type}', window_start: ${r.window_start}, spent_amount: '${r.spent_amount}')`,
+      ).join(", ");
+      throw new Error(
+        `Cannot migrate policy_budget_accumulators: table contains ${invalidRows.length} malformed accumulator row(s) failing strict numeric validation [${sample}]. Migration halted to prevent silent budget reset or data loss; original table preserved for investigation.`,
+      );
+    }
+
+    // 2. Query any non-automatic indexes to preserve them
+    const indexes = this.db.prepare(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'policy_budget_accumulators' AND sql IS NOT NULL",
+    ).all() as Array<{ name: string; sql: string }>;
+
+    // 3. Atomically rebuild table with strict schema
+    this.db.exec(`
+      CREATE TABLE policy_budget_accumulators_v2 (
+        policy_id TEXT NOT NULL,
+        window_type TEXT NOT NULL CHECK (window_type IN ('HOURLY', 'DAILY')),
+        window_start INTEGER NOT NULL,
+        spent_amount TEXT NOT NULL CHECK (length(spent_amount) > 0 AND length(spent_amount) <= 78 AND NOT (spent_amount GLOB '*[^0-9]*')),
+        last_updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (policy_id, window_type, window_start),
+        FOREIGN KEY (policy_id) REFERENCES policies(policy_id) ON DELETE CASCADE
+      );
+
+      INSERT INTO policy_budget_accumulators_v2 (
+        policy_id,
+        window_type,
+        window_start,
+        spent_amount,
+        last_updated_at
+      )
+      SELECT
+        policy_id,
+        window_type,
+        window_start,
+        spent_amount,
+        last_updated_at
+      FROM policy_budget_accumulators;
+
+      DROP TABLE policy_budget_accumulators;
+      ALTER TABLE policy_budget_accumulators_v2 RENAME TO policy_budget_accumulators;
+    `);
+
+    for (const idx of indexes) {
+      this.db.exec(idx.sql);
+    }
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_budget_accumulators_lookup
+        ON policy_budget_accumulators (policy_id, window_type, window_start);
+    `);
+  }
+
   private ensureGovernanceTables(): void {
     const tables = (
       this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>
@@ -604,20 +857,24 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
       }
     }
 
-    // Milestone 8: Policy budget accumulators for cumulative spending windows
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS policy_budget_accumulators (
-        policy_id TEXT NOT NULL,
-        window_type TEXT NOT NULL CHECK (window_type IN ('HOURLY', 'DAILY')),
-        window_start INTEGER NOT NULL,
-        spent_amount TEXT NOT NULL CHECK (length(spent_amount) <= 78 AND spent_amount GLOB '[0-9]*'),
-        last_updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (policy_id, window_type, window_start),
-        FOREIGN KEY (policy_id) REFERENCES policies(policy_id) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_budget_accumulators_lookup
-        ON policy_budget_accumulators (policy_id, window_type, window_start);
-    `);
+    // Milestone 8 & 9: Policy budget accumulators for cumulative spending windows
+    if (!tables.includes("policy_budget_accumulators")) {
+      this.db.exec(`
+        CREATE TABLE policy_budget_accumulators (
+          policy_id TEXT NOT NULL,
+          window_type TEXT NOT NULL CHECK (window_type IN ('HOURLY', 'DAILY')),
+          window_start INTEGER NOT NULL,
+          spent_amount TEXT NOT NULL CHECK (length(spent_amount) > 0 AND length(spent_amount) <= 78 AND NOT (spent_amount GLOB '*[^0-9]*')),
+          last_updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (policy_id, window_type, window_start),
+          FOREIGN KEY (policy_id) REFERENCES policies(policy_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_budget_accumulators_lookup
+          ON policy_budget_accumulators (policy_id, window_type, window_start);
+      `);
+    } else {
+      this.migrateBudgetAccumulators();
+    }
   }
 
   /**
