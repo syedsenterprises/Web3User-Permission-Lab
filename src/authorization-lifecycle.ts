@@ -710,9 +710,6 @@ export function issueSignedTransactionAuthorizationV3(
     return deny("Concurrent transaction in progress within same process; operation serialized.");
   }
 
-  const clock = store.getClock();
-  const initialNow = clock.nowSeconds();
-
   let db: ReturnType<typeof store.getDatabase>;
   try {
     db = store.getDatabase();
@@ -1018,12 +1015,10 @@ export function issueSignedTransactionAuthorizationV3(
  * Revalidate and consume an Ed25519-signed authorization artifact v3 atomically
  * in SQLite.
  *
- * Verifies artifact structure, captures trusted clock snapshot, checks high-water mark,
- * loads issuer key (enforcing retirement rules and permanent revocation), verifies
- * cryptographic signature, loads authoritative policy from SQLite (enforcing active status
- * and revision match), enforces signed authorization expiration boundary and policy/key
- * boundary limits, revalidates request binding, and transitions storage state
- * from 'issued' to 'consumed' within a single SQLite write transaction.
+ * Performs cryptographic pre-verification of the Ed25519 signature outside the exclusive write
+ * transaction to minimize lock hold duration and contention, then revalidates all mutable
+ * governance and replay state (key status, revocation, policy revision, clock high-water, and
+ * budget accumulators) transactionally within `BEGIN IMMEDIATE;` to guarantee strict TOCTOU safety.
  */
 export function consumeSignedTransactionAuthorizationV3(
   storeInput: SQLiteAuthorizationStore | { store: SQLiteAuthorizationStore },
@@ -1042,27 +1037,107 @@ export function consumeSignedTransactionAuthorizationV3(
   }
   const artifact: SignedAuthorizationArtifactV3 = artifactInput;
 
-  // 2. Check tainted store state and acquire in-process lock
+  // 2. Check tainted store state
   if (store.isTainted()) {
     return deny(
       `SQLiteAuthorizationStore database connection is tainted and unusable: ${store.getTaintedReason()}`,
     );
   }
 
-  const guard = store.getClockGuard();
-  if (!guard.acquireLock()) {
-    return deny("Concurrent transaction in progress within same process; operation serialized.");
+  // Check in-process duplicate before acquiring locks
+  if (isObject(envelopeInput) && consumedEnvelopes.has(envelopeInput)) {
+    return deny("Transaction authorization has already been consumed.");
   }
-
-  const clock = store.getClock();
-  const initialNow = clock.nowSeconds();
 
   let db: ReturnType<typeof store.getDatabase>;
   try {
     db = store.getDatabase();
   } catch (err) {
-    guard.releaseLock();
     return deny(err instanceof Error ? err.message : String(err));
+  }
+
+  // 3. Pre-verification Step (outside exclusive write lock and ClockGuard mutex):
+  // Read issuer key from storage for cryptographic pre-verification
+  let preKeyRow: {
+    public_key_pem: string;
+    status: string;
+    valid_from_seconds: number | null;
+    expires_at_seconds: number | null;
+    retired_at_seconds: number | null;
+    revoked_at_seconds: number | null;
+  } | undefined;
+
+  try {
+    preKeyRow = db.prepare(
+      "SELECT public_key_pem, status, valid_from_seconds, expires_at_seconds, retired_at_seconds, revoked_at_seconds FROM issuer_keys WHERE key_id = ?"
+    ).get(artifact.keyId) as typeof preKeyRow;
+  } catch (err) {
+    return deny(err instanceof Error ? err.message : String(err));
+  }
+
+  if (!preKeyRow) {
+    return deny("Issuer key is unknown.");
+  }
+
+  if (preKeyRow.status === "revoked") {
+    return deny("Issuer key has been revoked.");
+  }
+
+  if (preKeyRow.status !== "active" && preKeyRow.status !== "retired") {
+    return deny("Issuer key status does not permit verification.");
+  }
+
+  // Post-retirement forgery rule (pre-check):
+  // A retired key may validate only artifacts whose signed issuance time is strictly before retirement time
+  if (preKeyRow.status === "retired") {
+    if (preKeyRow.retired_at_seconds !== null && artifact.issuedAtSeconds >= preKeyRow.retired_at_seconds) {
+      return deny("Authorization was issued after issuer key was retired.");
+    }
+  }
+
+  // Key validity windows (pre-check based on signed issuance time)
+  if (preKeyRow.valid_from_seconds !== null && artifact.issuedAtSeconds < preKeyRow.valid_from_seconds) {
+    return deny("Issuer key was not yet valid at authorization issuance time.");
+  }
+  if (preKeyRow.expires_at_seconds !== null && artifact.issuedAtSeconds >= preKeyRow.expires_at_seconds) {
+    return deny("Issuer key had expired at authorization issuance time.");
+  }
+
+  const prePublicKey = parseEd25519PublicKey(preKeyRow.public_key_pem);
+  if (!prePublicKey) {
+    return deny("Corrupted issuer public key in storage.");
+  }
+
+  // Verify Ed25519 cryptographic signature outside the exclusive write lock
+  let payload: string;
+  try {
+    payload = canonicalSignedPayloadV3({
+      version: artifact.version,
+      authorizationId: artifact.authorizationId,
+      keyId: artifact.keyId,
+      issuedAtSeconds: artifact.issuedAtSeconds,
+      expiresAtSeconds: artifact.expiresAtSeconds,
+      policyId: artifact.policyId,
+      policyRevision: artifact.policyRevision,
+      bindingDigest: artifact.bindingDigest,
+    });
+  } catch {
+    return deny("Failed to construct canonical signed payload.");
+  }
+
+  if (!verifyAuthorizationPayload(prePublicKey, payload, artifact.signature)) {
+    return deny("Invalid authorization artifact signature.");
+  }
+
+  // Capture initial clock snapshot prior to lock acquisition.
+  // Models caller-side pre-lock time and establishes the baseline for SEC-63-01 TOCTOU race testing.
+  const initialNow = store.getClock().nowSeconds();
+  void initialNow;
+
+  // 4. Acquire in-process lock and SQLite exclusive write lock
+  const guard = store.getClockGuard();
+  if (!guard.acquireLock()) {
+    return deny("Concurrent transaction in progress within same process; operation serialized.");
   }
 
   try {
@@ -1078,7 +1153,7 @@ export function consumeSignedTransactionAuthorizationV3(
   let candidate: ClockCandidate;
 
   try {
-    // 2. Validate candidate time against guard and persisted high-water mark inside write lock
+    // 5. Validate candidate time against guard and persisted high-water mark inside write lock
     const clock = store.getClock();
     candidate = {
       wallSeconds: clock.nowSeconds(),
@@ -1113,13 +1188,13 @@ export function consumeSignedTransactionAuthorizationV3(
       `).run(effectiveNowSeconds);
     }
 
-    // Check in-process duplicate
+    // Check in-process duplicate inside write lock
     if (isObject(envelopeInput) && consumedEnvelopes.has(envelopeInput)) {
       db.exec("ROLLBACK;");
       return deny("Transaction authorization has already been consumed.");
     }
 
-    // 3. Verify issuer key status and issuance-time rule
+    // 6. TOCTOU Re-validation: Verify issuer key status under write lock
     const keyRow = db.prepare(
       "SELECT public_key_pem, status, valid_from_seconds, expires_at_seconds, retired_at_seconds, revoked_at_seconds FROM issuer_keys WHERE key_id = ?"
     ).get(artifact.keyId) as {
@@ -1169,33 +1244,10 @@ export function consumeSignedTransactionAuthorizationV3(
       return deny("Issuer key has expired.");
     }
 
-    const publicKey = parseEd25519PublicKey(keyRow.public_key_pem);
-    if (!publicKey) {
+    // Guard against key tampering in storage: verify public key PEM is unchanged
+    if (keyRow.public_key_pem !== preKeyRow.public_key_pem) {
       db.exec("ROLLBACK;");
-      return deny("Corrupted issuer public key in storage.");
-    }
-
-    // 4. Verify Ed25519 signature
-    let payload: string;
-    try {
-      payload = canonicalSignedPayloadV3({
-        version: artifact.version,
-        authorizationId: artifact.authorizationId,
-        keyId: artifact.keyId,
-        issuedAtSeconds: artifact.issuedAtSeconds,
-        expiresAtSeconds: artifact.expiresAtSeconds,
-        policyId: artifact.policyId,
-        policyRevision: artifact.policyRevision,
-        bindingDigest: artifact.bindingDigest,
-      });
-    } catch {
-      db.exec("ROLLBACK;");
-      return deny("Failed to construct canonical signed payload.");
-    }
-
-    if (!verifyAuthorizationPayload(publicKey, payload, artifact.signature)) {
-      db.exec("ROLLBACK;");
-      return deny("Invalid authorization artifact signature.");
+      return deny("Issuer key was modified concurrently.");
     }
 
     // 5. Load authoritative policy and reject stale revisions or revoked/retired policies

@@ -1,6 +1,6 @@
 import { fork } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -1689,6 +1689,840 @@ describe("Milestone 9 — Phase 2: Adversarial Security Test Suite", () => {
       expect(consumeSuccess.decision).toBe("ALLOW");
       expect(authStore.getAuthorizationRecord("auth-mid-tx-fail")?.state).toBe("consumed");
       expect(authStore.getPolicyBudgetAccumulator(budgetedPolicy.policyId, "HOURLY", 0)?.spentAmount).toBe("50");
+    });
+  });
+
+  // =========================================================================
+  // Scope 9: Database Snapshot Restoration, Storage Rollback & Recovery Invariants
+  // =========================================================================
+  describe("Scope 9: Database Snapshot Restoration, Storage Rollback & Recovery Invariants", () => {
+    function snapshotDatabase(dbPath: string, snapshotPath: string): void {
+      copyFileSync(dbPath, snapshotPath);
+      const walPath = `${dbPath}-wal`;
+      const snapshotWalPath = `${snapshotPath}-wal`;
+      if (existsSync(walPath)) {
+        copyFileSync(walPath, snapshotWalPath);
+      }
+    }
+
+    function restoreDatabase(snapshotPath: string, dbPath: string): void {
+      copyFileSync(snapshotPath, dbPath);
+      const walPath = `${dbPath}-wal`;
+      const shmPath = `${dbPath}-shm`;
+      const snapshotWalPath = `${snapshotPath}-wal`;
+      if (existsSync(snapshotWalPath)) {
+        copyFileSync(snapshotWalPath, walPath);
+      } else if (existsSync(walPath)) {
+        rmSync(walPath, { force: true });
+      }
+      if (existsSync(shmPath)) {
+        rmSync(shmPath, { force: true });
+      }
+    }
+
+    it("demonstrates replay vulnerability when restoring a database snapshot taken after issuance but before consumption within TTL", () => {
+      const dbFile = createTestDbPath("m10-scope9-replay-");
+      const snapshotFile = `${dbFile}.snapshot`;
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-snap-1",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-snap-replay",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+        budget: {
+          window: "HOURLY",
+          maxCumulativeAmount: "200",
+        },
+      };
+      policyStore.registerPolicy(policy);
+
+      const req: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 50n),
+        value: "0",
+      };
+
+      // 1. Issue authorization at t = 1000 with TTL = 300s (expiresAt = 1300)
+      const issueRes = issueAllow(authStore, { keyId: "k-snap-1", privateKey }, "auth-snap-01", policy.policyId, req, { ttlSeconds: 300 });
+      expect(authStore.getAuthorizationRecord("auth-snap-01")?.state).toBe("issued");
+
+      // Checkpoint WAL and capture cold snapshot of database
+      authStore.checkpoint("TRUNCATE");
+      authStore.close();
+      snapshotDatabase(dbFile, snapshotFile);
+
+      // 2. Advance time to t = 1050, open store, and consume the authorization
+      const clock2 = new TestClock(1050);
+      const store2 = new SQLiteAuthorizationStore(dbFile, { clock: clock2 });
+      openStores.push(store2);
+
+      const env1 = createTransactionEnvelope(req);
+      if (!env1.ok) throw new Error("env failed");
+      const consume1 = consumeSignedTransactionAuthorizationV3(
+        store2,
+        issueRes.artifact,
+        env1.envelope,
+        req,
+      );
+      expect(consume1.decision).toBe("ALLOW");
+      expect(store2.getAuthorizationRecord("auth-snap-01")?.state).toBe("consumed");
+      expect(store2.getPolicyBudgetAccumulator(policy.policyId, "HOURLY", 0)?.spentAmount).toBe("50");
+
+      // Verify that replay is prevented in the active database
+      const envReplay = createTransactionEnvelope(req);
+      if (!envReplay.ok) throw new Error("env failed");
+      const replayAttempt1 = consumeSignedTransactionAuthorizationV3(
+        store2,
+        issueRes.artifact,
+        envReplay.envelope,
+        req,
+      );
+      expect(replayAttempt1.decision).toBe("DENY");
+      expect(replayAttempt1.reasons[0]).toMatch(/already been consumed|unknown, consumed, or mismatched/);
+
+      // Close store before disaster recovery
+      store2.close();
+
+      // 3. Disaster recovery simulation: Restore the cold snapshot from t = 1000 at t = 1100
+      // (t = 1100 is within TTL 1300, and forward gap 1100 - 1000 = 100s <= 3600s startup limit)
+      restoreDatabase(snapshotFile, dbFile);
+
+      const clock3 = new TestClock(1100);
+      const store3 = new SQLiteAuthorizationStore(dbFile, { clock: clock3 });
+      openStores.push(store3);
+
+      // In the restored database, the record has reverted to 'issued' and spend is rewound
+      const restoredRecord = store3.getAuthorizationRecord("auth-snap-01");
+      expect(restoredRecord?.state).toBe("issued");
+      expect(store3.getPolicyBudgetAccumulator(policy.policyId, "HOURLY", 0)).toBeNull();
+
+      // 4. Vulnerability demonstration: Resubmitting the same signed authorization succeeds again!
+      const envRestored = createTransactionEnvelope(req);
+      if (!envRestored.ok) throw new Error("env failed");
+      const replayInRestoredDb = consumeSignedTransactionAuthorizationV3(
+        store3,
+        issueRes.artifact,
+        envRestored.envelope,
+        req,
+      );
+
+      // Proves that local SQLite alone cannot prevent replay after storage snapshot restoration
+      // if current time is within TTL and within maxStartupForwardGapSeconds.
+      expect(replayInRestoredDb.decision).toBe("ALLOW");
+      expect(store3.getAuthorizationRecord("auth-snap-01")?.state).toBe("consumed");
+      expect(store3.getPolicyBudgetAccumulator(policy.policyId, "HOURLY", 0)?.spentAmount).toBe("50");
+    });
+
+    it("demonstrates cumulative budget bypass when restoring a snapshot to rewind recorded spending within the same window", () => {
+      const dbFile = createTestDbPath("m10-scope9-budget-rewind-");
+      const snapshotFile = `${dbFile}.snapshot`;
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-snap-2",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-snap-budget",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+        budget: {
+          window: "HOURLY",
+          maxCumulativeAmount: "100", // Hard aggregate limit of 100 for the hour
+        },
+      };
+      policyStore.registerPolicy(policy);
+
+      // Snapshot taken at t = 1000 with 0 spent
+      authStore.checkpoint("TRUNCATE");
+      authStore.close();
+      snapshotDatabase(dbFile, snapshotFile);
+
+      // Open store at t = 1010
+      const clock2 = new TestClock(1010);
+      const store2 = new SQLiteAuthorizationStore(dbFile, { clock: clock2 });
+      openStores.push(store2);
+
+      const req60: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 60n),
+        value: "0",
+      };
+      const issue60 = issueAllow(store2, { keyId: "k-snap-2", privateKey }, "auth-60", policy.policyId, req60);
+      const env60 = createTransactionEnvelope(req60);
+      if (!env60.ok) throw new Error("env failed");
+      const consume60 = consumeSignedTransactionAuthorizationV3(store2, issue60.artifact, env60.envelope, req60);
+      expect(consume60.decision).toBe("ALLOW");
+      expect(store2.getPolicyBudgetAccumulator(policy.policyId, "HOURLY", 0)?.spentAmount).toBe("60");
+
+      // Transaction 2: spend 30 (total = 90)
+      const req30: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 30n),
+        value: "0",
+      };
+      const issue30 = issueAllow(store2, { keyId: "k-snap-2", privateKey }, "auth-30", policy.policyId, req30);
+      const env30 = createTransactionEnvelope(req30);
+      if (!env30.ok) throw new Error("env failed");
+      const consume30 = consumeSignedTransactionAuthorizationV3(store2, issue30.artifact, env30.envelope, req30);
+      expect(consume30.decision).toBe("ALLOW");
+      expect(store2.getPolicyBudgetAccumulator(policy.policyId, "HOURLY", 0)?.spentAmount).toBe("90");
+
+      // Transaction 3: attempt spend 25 -> must DENY because 90 + 25 = 115 > 100
+      const req25: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 25n),
+        value: "0",
+      };
+      const issue25 = issueAllow(store2, { keyId: "k-snap-2", privateKey }, "auth-25", policy.policyId, req25);
+      const env25 = createTransactionEnvelope(req25);
+      if (!env25.ok) throw new Error("env failed");
+      const consume25 = consumeSignedTransactionAuthorizationV3(store2, issue25.artifact, env25.envelope, req25);
+      expect(consume25.decision).toBe("DENY");
+      expect(consume25.reasons[0]).toMatch(/Cumulative spending budget exceeded/);
+
+      store2.close();
+
+      // Restore snapshot from t = 1000 at t = 1050 (spend is rewound to 0 in storage)
+      restoreDatabase(snapshotFile, dbFile);
+
+      const clock3 = new TestClock(1050);
+      const store3 = new SQLiteAuthorizationStore(dbFile, { clock: clock3 });
+      openStores.push(store3);
+
+      expect(store3.getPolicyBudgetAccumulator(policy.policyId, "HOURLY", 0)).toBeNull();
+
+      // In the restored database, spend is 0. An attacker or application can now issue and consume
+      // an additional 80 units of spending within the same hourly window!
+      const req80: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 80n),
+        value: "0",
+      };
+      const issue80 = issueAllow(store3, { keyId: "k-snap-2", privateKey }, "auth-80", policy.policyId, req80);
+      const env80 = createTransactionEnvelope(req80);
+      if (!env80.ok) throw new Error("env failed");
+      const consume80 = consumeSignedTransactionAuthorizationV3(store3, issue80.artifact, env80.envelope, req80);
+      expect(consume80.decision).toBe("ALLOW");
+      expect(store3.getPolicyBudgetAccumulator(policy.policyId, "HOURLY", 0)?.spentAmount).toBe("80");
+
+      // Across reality, 60 + 30 + 80 = 170 units were authorized against a 100 unit budget cap.
+      // Proves that restoring an older snapshot rewinds cumulative spending accounting.
+    });
+
+    it("verifies that ClockGuard startup gap check prevents database operation when snapshot is older than maxStartupForwardGapSeconds", () => {
+      const dbFile = createTestDbPath("m10-scope9-startup-gap-");
+      const snapshotFile = `${dbFile}.snapshot`;
+      const { authStore } = setupStores(dbFile, 1000);
+
+      // Snapshot taken at t = 1000 (high water mark = 1000)
+      authStore.checkpoint("TRUNCATE");
+      authStore.close();
+      snapshotDatabase(dbFile, snapshotFile);
+
+      // Restore the snapshot, but current wall clock has advanced to t = 5000 (gap = 4000s > default 3600s)
+      restoreDatabase(snapshotFile, dbFile);
+
+      const futureClock = new TestClock(5000);
+      // Attempting to open the store with default options (maxStartupForwardGapSeconds = 3600)
+      // must fail closed during schema initialization with a startup gap error
+      expect(() => {
+        new SQLiteAuthorizationStore(dbFile, { clock: futureClock });
+      }).toThrow(/forward clock gap of 4000 seconds exceeds maximum/);
+    });
+
+    it("verifies that expired authorizations cannot be replayed after snapshot restoration even if database state was rewound", () => {
+      const dbFile = createTestDbPath("m10-scope9-expired-ttl-");
+      const snapshotFile = `${dbFile}.snapshot`;
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-snap-3",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-snap-expiry",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+      };
+      policyStore.registerPolicy(policy);
+
+      const req: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 50n),
+        value: "0",
+      };
+
+      // Issue with short TTL of 60 seconds (expires at t = 1060)
+      const issueRes = issueAllow(authStore, { keyId: "k-snap-3", privateKey }, "auth-snap-exp", policy.policyId, req, { ttlSeconds: 60 });
+      expect(issueRes.artifact.expiresAtSeconds).toBe(1060);
+
+      // Take snapshot while in 'issued' state at t = 1000
+      authStore.checkpoint("TRUNCATE");
+      authStore.close();
+      snapshotDatabase(dbFile, snapshotFile);
+
+      // Consume at t = 1020 in active database
+      const clock2 = new TestClock(1020);
+      const store2 = new SQLiteAuthorizationStore(dbFile, { clock: clock2 });
+      openStores.push(store2);
+      const env = createTransactionEnvelope(req);
+      if (!env.ok) throw new Error("env failed");
+      const consumeRes = consumeSignedTransactionAuthorizationV3(store2, issueRes.artifact, env.envelope, req);
+      expect(consumeRes.decision).toBe("ALLOW");
+      expect(store2.getAuthorizationRecord("auth-snap-exp")?.state).toBe("consumed");
+      store2.close();
+
+      // Restore snapshot at t = 1100 (gap is 100s <= 3600s, so store startup succeeds, but t = 1100 > expiresAtSeconds = 1060)
+      restoreDatabase(snapshotFile, dbFile);
+
+      const clock3 = new TestClock(1100);
+      const store3 = new SQLiteAuthorizationStore(dbFile, { clock: clock3 });
+      openStores.push(store3);
+
+      // Database shows 'issued', but artifact expiry is strictly enforced
+      expect(store3.getAuthorizationRecord("auth-snap-exp")?.state).toBe("issued");
+
+      const envRestored = createTransactionEnvelope(req);
+      if (!envRestored.ok) throw new Error("env failed");
+      const replayAttempt = consumeSignedTransactionAuthorizationV3(
+        store3,
+        issueRes.artifact,
+        envRestored.envelope,
+        req,
+      );
+
+      expect(replayAttempt.decision).toBe("DENY");
+      expect(replayAttempt.reasons[0]).toMatch(/Signed transaction authorization has expired/);
+
+      // State in database remains unconsumed
+      expect(store3.getAuthorizationRecord("auth-snap-exp")?.state).toBe("issued");
+    });
+
+    it("demonstrates that emergency issuer key revocation neutralizes restored unconsumed authorizations", () => {
+      const dbFile = createTestDbPath("m10-scope9-key-revoke-");
+      const snapshotFile = `${dbFile}.snapshot`;
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-snap-rev",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-snap-key-rev",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+      };
+      policyStore.registerPolicy(policy);
+
+      const req: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 50n),
+        value: "0",
+      };
+
+      // Issue authorization at t = 1000 with TTL = 300s (expires at 1300)
+      const issueRes = issueAllow(authStore, { keyId: "k-snap-rev", privateKey }, "auth-snap-rev-01", policy.policyId, req, { ttlSeconds: 300 });
+
+      // Snapshot taken at t = 1000 while 'issued'
+      authStore.checkpoint("TRUNCATE");
+      authStore.close();
+      snapshotDatabase(dbFile, snapshotFile);
+
+      // Consumed at t = 1020 in active database
+      const clock2 = new TestClock(1020);
+      const store2 = new SQLiteAuthorizationStore(dbFile, { clock: clock2 });
+      openStores.push(store2);
+      const env = createTransactionEnvelope(req);
+      if (!env.ok) throw new Error("env failed");
+      expect(consumeSignedTransactionAuthorizationV3(store2, issueRes.artifact, env.envelope, req).decision).toBe("ALLOW");
+      store2.close();
+
+      // Restore snapshot at t = 1050
+      restoreDatabase(snapshotFile, dbFile);
+
+      const clock3 = new TestClock(1050);
+      const store3 = new SQLiteAuthorizationStore(dbFile, { clock: clock3 });
+      openStores.push(store3);
+
+      // Safe recovery procedure: operator revokes the key that was active during the snapshot gap
+      store3.getKeyStore().revokeKey("k-snap-rev", 1050);
+
+      // Now, any attempt to replay the restored authorization fails closed!
+      const envRestored = createTransactionEnvelope(req);
+      if (!envRestored.ok) throw new Error("env failed");
+      const replayAttempt = consumeSignedTransactionAuthorizationV3(
+        store3,
+        issueRes.artifact,
+        envRestored.envelope,
+        req,
+      );
+
+      expect(replayAttempt.decision).toBe("DENY");
+      expect(replayAttempt.reasons[0]).toMatch(/Issuer key has been revoked/);
+    });
+  });
+
+  // =========================================================================
+  // Scope 10: Concurrency, TOCTOU State Invalidation & Pre-Verification Race Resilience (Milestone 10 Phase 2B)
+  // =========================================================================
+  describe("Scope 10: Concurrency, TOCTOU State Invalidation & Pre-Verification Race Resilience", () => {
+    it("fails closed when issuer key is revoked between pre-verification and write-transaction execution", () => {
+      const dbFile = createTestDbPath("m10-scope10-revoke-toctou-");
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-toctou-rev",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-toctou-rev",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+      };
+      policyStore.registerPolicy(policy);
+
+      const req: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 50n),
+        value: "0",
+      };
+
+      const issueRes = issueAllow(authStore, { keyId: "k-toctou-rev", privateKey }, "auth-toctou-rev-1", "pol-toctou-rev", req);
+      const env = createTransactionEnvelope(req);
+      if (!env.ok) throw new Error("env failed");
+
+      // Set up a competing connection that revokes the key during the pre-transaction clock sampling hook
+      const clock2 = new TestClock(1010);
+      const store2 = new SQLiteAuthorizationStore(dbFile, { clock: clock2 });
+      openStores.push(store2);
+
+      let triggerRace = false;
+      let snapshotCount = 0;
+      const racingClock = {
+        nowSeconds(): number {
+          if (triggerRace) {
+            snapshotCount++;
+            if (snapshotCount === 1) {
+              // Intervene between pre-verification and write-transaction acquisition:
+              store2.getKeyStore().revokeKey("k-toctou-rev", 1010);
+              return 1010;
+            }
+            return 1010;
+          }
+          return 1000;
+        },
+      };
+
+      const racingStore = new SQLiteAuthorizationStore(dbFile, racingClock);
+      openStores.push(racingStore);
+      triggerRace = true;
+
+      const consumeRes = consumeSignedTransactionAuthorizationV3(
+        racingStore,
+        issueRes.artifact,
+        env.envelope,
+        req,
+      );
+
+      // Must fail closed with revoked key reason!
+      expect(consumeRes.decision).toBe("DENY");
+      expect(consumeRes.reasons[0]).toMatch(/Issuer key has been revoked/);
+
+      // Persistent record must remain in 'issued' state
+      const record = authStore.getAuthorizationRecord("auth-toctou-rev-1");
+      expect(record?.state).toBe("issued");
+    });
+
+    it("fails closed when authorization expires between pre-verification and write-transaction execution", () => {
+      const dbFile = createTestDbPath("m10-scope10-exp-toctou-");
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-toctou-exp",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-toctou-exp",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+      };
+      policyStore.registerPolicy(policy);
+
+      const req: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 50n),
+        value: "0",
+      };
+
+      // Issued at t=1000 with TTL=60s -> expires at 1060
+      const issueRes = issueAllow(authStore, { keyId: "k-toctou-exp", privateKey }, "auth-toctou-exp-1", "pol-toctou-exp", req, { ttlSeconds: 60 });
+      expect(issueRes.artifact.expiresAtSeconds).toBe(1060);
+      const env = createTransactionEnvelope(req);
+      if (!env.ok) throw new Error("env failed");
+
+      // Competing store advances clock and persistent high-water mark past 1060
+      const clock2 = new TestClock(1070);
+      const store2 = new SQLiteAuthorizationStore(dbFile, { clock: clock2 });
+      openStores.push(store2);
+
+      let triggerRace = false;
+      let snapshotCount = 0;
+      const racingClock = {
+        nowSeconds(): number {
+          if (triggerRace) {
+            snapshotCount++;
+            if (snapshotCount === 1) {
+              // Competing store advances persistent high water mark past expiration boundary:
+              store2.advanceHighWaterMark(1070);
+              return 1050; // caller's pre-check was within 1000..1060 window
+            }
+            return 1070;
+          }
+          return 1000;
+        },
+      };
+
+      const racingStore = new SQLiteAuthorizationStore(dbFile, racingClock);
+      openStores.push(racingStore);
+      triggerRace = true;
+
+      const consumeRes = consumeSignedTransactionAuthorizationV3(
+        racingStore,
+        issueRes.artifact,
+        env.envelope,
+        req,
+      );
+
+      // Must fail closed with expired reason
+      expect(consumeRes.decision).toBe("DENY");
+      expect(consumeRes.reasons).toContain("Signed transaction authorization has expired.");
+
+      // Record remains in 'issued' state
+      const record = authStore.getAuthorizationRecord("auth-toctou-exp-1");
+      expect(record?.state).toBe("issued");
+    });
+
+    it("fails closed when policy revision increments between pre-verification and write-transaction execution", () => {
+      const dbFile = createTestDbPath("m10-scope10-rev-bump-");
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-toctou-pol",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-toctou-bump",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+      };
+      policyStore.registerPolicy(policy);
+
+      const req: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 50n),
+        value: "0",
+      };
+
+      // Issued for revision 1
+      const issueRes = issueAllow(authStore, { keyId: "k-toctou-pol", privateKey }, "auth-toctou-bump-1", "pol-toctou-bump", req);
+      expect(issueRes.artifact.policyRevision).toBe(1);
+      const env = createTransactionEnvelope(req);
+      if (!env.ok) throw new Error("env failed");
+
+      // Competing store updates policy to revision 2
+      const clock2 = new TestClock(1010);
+      const store2 = new SQLiteAuthorizationStore(dbFile, { clock: clock2 });
+      openStores.push(store2);
+
+      let triggerRace = false;
+      let snapshotCount = 0;
+      const racingClock = {
+        nowSeconds(): number {
+          if (triggerRace) {
+            snapshotCount++;
+            if (snapshotCount === 1) {
+              // Bump policy revision from 1 to 2 before write transaction begins
+              store2.getPolicyStore().updatePolicy({
+                ...policy,
+                maxAmount: "150",
+              });
+              return 1010;
+            }
+            return 1010;
+          }
+          return 1000;
+        },
+      };
+
+      const racingStore = new SQLiteAuthorizationStore(dbFile, racingClock);
+      openStores.push(racingStore);
+      triggerRace = true;
+
+      const consumeRes = consumeSignedTransactionAuthorizationV3(
+        racingStore,
+        issueRes.artifact,
+        env.envelope,
+        req,
+      );
+
+      // Must fail closed with revision mismatch reason
+      expect(consumeRes.decision).toBe("DENY");
+      expect(consumeRes.reasons[0]).toMatch(/Policy revision mismatch: artifact bound to revision 1, but current policy revision is 2/);
+
+      // Record remains in 'issued' state
+      const record = authStore.getAuthorizationRecord("auth-toctou-bump-1");
+      expect(record?.state).toBe("issued");
+    });
+
+    it("guarantees single-use serialization when multiple store connections race to consume the same authorization", () => {
+      const dbFile = createTestDbPath("m10-scope10-replay-race-");
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-race-replay",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-race-replay",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+      };
+      policyStore.registerPolicy(policy);
+
+      const req: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 40n),
+        value: "0",
+      };
+
+      const issueRes = issueAllow(authStore, { keyId: "k-race-replay", privateKey }, "auth-race-replay-1", "pol-race-replay", req);
+
+      // Create two distinct store connections to the same database
+      const clockA = new TestClock(1010);
+      const storeA = new SQLiteAuthorizationStore(dbFile, { clock: clockA });
+      openStores.push(storeA);
+
+      const clockB = new TestClock(1010);
+      const storeB = new SQLiteAuthorizationStore(dbFile, { clock: clockB });
+      openStores.push(storeB);
+
+      const envA = createTransactionEnvelope(req);
+      if (!envA.ok) throw new Error("envA failed");
+      const envB = createTransactionEnvelope(req);
+      if (!envB.ok) throw new Error("envB failed");
+
+      // First consumer succeeds
+      const resA = consumeSignedTransactionAuthorizationV3(storeA, issueRes.artifact, envA.envelope, req);
+      expect(resA.decision).toBe("ALLOW");
+
+      // Second consumer racing on the same authorization ID is rejected
+      const resB = consumeSignedTransactionAuthorizationV3(storeB, issueRes.artifact, envB.envelope, req);
+      expect(resB.decision).toBe("DENY");
+      expect(resB.reasons[0]).toMatch(/Bound transaction authorization is unknown, consumed, or mismatched/);
+
+      // Final persistent state is consumed with exactly 1 consumption record
+      const record = authStore.getAuthorizationRecord("auth-race-replay-1");
+      expect(record?.state).toBe("consumed");
+    });
+
+    it("strictly prevents cumulative budget overruns when distinct authorizations race against a shared budget cap", () => {
+      const dbFile = createTestDbPath("m10-scope10-budget-race-");
+      const { authStore, policyStore, keyStore } = setupStores(dbFile, 1000);
+      const { privateKey, pem } = createKeypair();
+
+      keyStore.registerKey({
+        keyId: "k-race-budget",
+        publicKey: pem,
+        status: "active",
+        validFromSeconds: 0,
+        expiresAtSeconds: 20000,
+      });
+
+      // Policy with hourly budget cap of 100
+      const policy: DemoPolicy = {
+        version: 1,
+        policyId: "pol-race-budget",
+        allowedTarget: TARGET,
+        allowedRecipient: RECIPIENT,
+        allowedSelector: "0xa9059cbb",
+        maxAmount: "100",
+        validFrom: 0,
+        expiresAt: 20000,
+        revoked: false,
+        budget: {
+          window: "HOURLY",
+          maxCumulativeAmount: "100",
+        },
+      };
+      policyStore.registerPolicy(policy);
+
+      const req60: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 60n),
+        value: "0",
+      };
+
+      const req50: TransactionRequest = {
+        chainId: "1",
+        sender: "0x3333333333333333333333333333333333333333",
+        target: TARGET,
+        calldata: encodeCalldata(RECIPIENT, 50n),
+        value: "0",
+      };
+
+      // Issue two distinct authorizations: one for 60, one for 50 (sum = 110 > 100)
+      const issue60 = issueAllow(authStore, { keyId: "k-race-budget", privateKey }, "auth-race-60", "pol-race-budget", req60);
+      const issue50 = issueAllow(authStore, { keyId: "k-race-budget", privateKey }, "auth-race-50", "pol-race-budget", req50);
+
+      // Distinct connections
+      const clock1 = new TestClock(1010);
+      const store1 = new SQLiteAuthorizationStore(dbFile, { clock: clock1 });
+      openStores.push(store1);
+
+      const clock2 = new TestClock(1010);
+      const store2 = new SQLiteAuthorizationStore(dbFile, { clock: clock2 });
+      openStores.push(store2);
+
+      const env60 = createTransactionEnvelope(req60);
+      if (!env60.ok) throw new Error("env60 failed");
+      const env50 = createTransactionEnvelope(req50);
+      if (!env50.ok) throw new Error("env50 failed");
+
+      // First transaction consumes 60 tokens -> Allowed (spent = 60 <= 100)
+      const res60 = consumeSignedTransactionAuthorizationV3(store1, issue60.artifact, env60.envelope, req60);
+      expect(res60.decision).toBe("ALLOW");
+
+      // Second transaction attempts to consume 50 tokens -> Denied (60 + 50 = 110 > 100)
+      const res50 = consumeSignedTransactionAuthorizationV3(store2, issue50.artifact, env50.envelope, req50);
+      expect(res50.decision).toBe("DENY");
+      expect(res50.reasons[0]).toMatch(/Cumulative spending budget exceeded for hourly window/);
+
+      // Verify accumulator spent_amount is exactly 60, not 110
+      const windowStart = calculateBudgetWindowStart(1010, "HOURLY");
+      const accum = authStore.getPolicyBudgetAccumulator("pol-race-budget", "HOURLY", windowStart);
+      expect(accum).not.toBeNull();
+      expect(accum?.spentAmount).toBe("60");
+
+      // Verify first auth is consumed, second remains issued
+      expect(authStore.getAuthorizationRecord("auth-race-60")?.state).toBe("consumed");
+      expect(authStore.getAuthorizationRecord("auth-race-50")?.state).toBe("issued");
     });
   });
 });
