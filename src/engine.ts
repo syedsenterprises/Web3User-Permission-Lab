@@ -26,7 +26,13 @@ import {
   generateIssuerKeyPair,
   type SignedAuthorizationArtifactV3,
 } from "./authorization-crypto.js";
-import { type DemoPolicy } from "./policy.js";
+import {
+  type DemoPolicy,
+  type BudgetWindowType,
+  BUDGET_WINDOW_SECONDS,
+  calculateBudgetWindowStart,
+  calculateBudgetWindowEnd,
+} from "./policy.js";
 import {
   createTransactionEnvelope,
   matchesTransactionEnvelope,
@@ -521,6 +527,60 @@ export class Web3UserEngine {
       this.assertNotTainted();
       try {
         return this.store.getPolicyStore().listPolicyRevisions(policyId);
+      } catch (err) {
+        this.handleError(err);
+      }
+    },
+    getBudgetStatus: (
+      policyId: string,
+      atSeconds?: number,
+    ): {
+      hasBudget: boolean;
+      window?: BudgetWindowType;
+      maxCumulativeAmount?: string;
+      windowStart?: number;
+      windowEnd?: number;
+      spentAmount?: string;
+      remainingAmount?: string;
+    } | null => {
+      this.assertOpen();
+      this.assertNotTainted();
+      try {
+        if (atSeconds !== undefined) {
+          if (
+            typeof atSeconds !== "number" ||
+            !Number.isSafeInteger(atSeconds) ||
+            atSeconds < 0
+          ) {
+            throw new Error(
+              `effectiveNowSeconds must be a non-negative safe integer, received: ${atSeconds}`,
+            );
+          }
+        }
+        const policyRecord = this.store.getPolicyStore().getPolicy(policyId);
+        if (!policyRecord) return null;
+        const policy = policyRecord.policy;
+        if (!policy.budget) {
+          return { hasBudget: false };
+        }
+        const nowSec = atSeconds ?? this.store.getClock().nowSeconds();
+        const windowStart = calculateBudgetWindowStart(nowSec, policy.budget.window);
+        const windowEnd = calculateBudgetWindowEnd(nowSec, policy.budget.window);
+        const accum = this.store.getPolicyBudgetAccumulator(policyId, policy.budget.window, windowStart);
+        const spent = accum ? accum.spentAmount : "0";
+        const maxBig = BigInt(policy.budget.maxCumulativeAmount);
+        const spentBig = BigInt(spent);
+        const remaining = maxBig >= spentBig ? (maxBig - spentBig).toString(10) : "0";
+
+        return {
+          hasBudget: true,
+          window: policy.budget.window,
+          maxCumulativeAmount: policy.budget.maxCumulativeAmount,
+          windowStart,
+          windowEnd,
+          spentAmount: spent,
+          remainingAmount: remaining,
+        };
       } catch (err) {
         this.handleError(err);
       }

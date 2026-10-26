@@ -6,7 +6,7 @@ import {
   type ClockCandidate,
   type MonotonicClock,
 } from "./clock.js";
-import { type DemoPolicy, normalizeDemoPolicy } from "./policy.js";
+import { type DemoPolicy, type PolicyBudgetConfig, normalizeDemoPolicy } from "./policy.js";
 import { isFatalIOError, withImmediateTransaction } from "./sqlite-transaction.js";
 
 export type PolicyStatus = "active" | "revoked" | "retired";
@@ -586,6 +586,8 @@ export class SQLitePolicyStore implements PolicyStore {
               throw new Error(`Policy '${normalized.policyId}' is already registered.`);
             }
 
+            this.assertWindowTypeImmutability(normalized.policyId, normalized.budget);
+
             // 2. Check historical revisions in policy_revisions
             const maxRevRow = this.db.prepare(
               "SELECT MAX(revision) AS maxRev FROM policy_revisions WHERE policy_id = ?"
@@ -772,6 +774,65 @@ export class SQLitePolicyStore implements PolicyStore {
     }
   }
 
+  private assertWindowTypeImmutability(policyId: string, candidateBudget?: PolicyBudgetConfig): void {
+    if (!candidateBudget) {
+      return;
+    }
+
+    // 1. Check current policy row in policies table
+    const currentRow = this.db.prepare(
+      "SELECT policy_json FROM policies WHERE policy_id = ?"
+    ).get(policyId) as { policy_json: string } | undefined;
+
+    if (currentRow) {
+      let curPolicy: DemoPolicy | null = null;
+      try {
+        curPolicy = JSON.parse(currentRow.policy_json) as DemoPolicy;
+      } catch {}
+      if (curPolicy?.budget && curPolicy.budget.window !== candidateBudget.window) {
+        throw new Error(
+          `Cannot change budget window type from '${curPolicy.budget.window}' to '${candidateBudget.window}' for existing policy '${policyId}'; changing budget cadence requires a new policy identity.`
+        );
+      }
+    }
+
+    // 2. Check historical policy revisions for any prior configured budget window
+    const revRows = this.db.prepare(
+      "SELECT policy_json FROM policy_revisions WHERE policy_id = ? ORDER BY revision ASC"
+    ).all(policyId) as Array<{ policy_json: string }>;
+
+    for (const revRow of revRows) {
+      let revPolicy: DemoPolicy | null = null;
+      try {
+        revPolicy = JSON.parse(revRow.policy_json) as DemoPolicy;
+      } catch {
+        continue;
+      }
+      if (revPolicy?.budget && revPolicy.budget.window !== candidateBudget.window) {
+        throw new Error(
+          `Cannot change budget window type from '${revPolicy.budget.window}' to '${candidateBudget.window}' for existing policy '${policyId}'; changing budget cadence requires a new policy identity.`
+        );
+      }
+    }
+
+    // 3. Check durable budget accumulators table if present in the database
+    const hasTable = this.db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'policy_budget_accumulators'"
+    ).get();
+
+    if (hasTable) {
+      const accumRow = this.db.prepare(
+        "SELECT window_type FROM policy_budget_accumulators WHERE policy_id = ? AND window_type != ? LIMIT 1"
+      ).get(policyId, candidateBudget.window) as { window_type: string } | undefined;
+
+      if (accumRow) {
+        throw new Error(
+          `Cannot change budget window type from '${accumRow.window_type}' to '${candidateBudget.window}' for existing policy '${policyId}'; changing budget cadence requires a new policy identity.`
+        );
+      }
+    }
+  }
+
   updatePolicy(policyInput: DemoPolicy, expectedCurrentRevision?: number): PolicyRecord {
     if (this.isTainted()) {
       throw new Error(
@@ -814,11 +875,12 @@ export class SQLitePolicyStore implements PolicyStore {
             this.updateHighWaterMarkInternal(nowSeconds, candidate);
 
             const row = this.db.prepare(
-              "SELECT policy_id, current_revision, status FROM policies WHERE policy_id = ?"
+              "SELECT policy_id, current_revision, status, policy_json FROM policies WHERE policy_id = ?"
             ).get(normalized.policyId) as {
               policy_id: string;
               current_revision: number;
               status: PolicyStatus;
+              policy_json: string;
             } | undefined;
 
             if (!row) {
@@ -837,6 +899,9 @@ export class SQLitePolicyStore implements PolicyStore {
                 `Stale revision for policy '${normalized.policyId}': expected revision ${expectedCurrentRevision}, but current revision is ${row.current_revision}.`
               );
             }
+
+            // Window Type Immutability Rule: Cadence change requires a new policy identity
+            this.assertWindowTypeImmutability(normalized.policyId, normalized.budget);
 
             const newRevision = row.current_revision + 1;
             const policyJson = JSON.stringify(normalized);
@@ -1083,6 +1148,7 @@ export class SQLitePolicyStore implements PolicyStore {
                   `Policy ID mismatch: updated policy ID '${normalized.policyId}' does not match target policy ID '${policyId}'.`
                 );
               }
+              this.assertWindowTypeImmutability(policyId, normalized.budget);
               restoredPolicy = { ...normalized, revoked: false };
             } else {
               const currentPolicy = JSON.parse(row.policy_json) as DemoPolicy;

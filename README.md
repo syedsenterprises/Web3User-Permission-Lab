@@ -14,7 +14,7 @@ Designed for transaction relayers, wallet middleware, and dApp backends, Web3Use
 > - The SDK does **not** sign Ethereum transactions with wallet keys (secp256k1), submit RPC requests to nodes, manage mempool broadcasts, estimate gas, manage nonces, or custody assets.
 > - An `ALLOW` decision indicates off-chain policy compliance; it does **not** constitute blockchain execution or funds movement. The integrating relayer or application remains responsible for separate wallet-signing and RPC broadcast.
 > - **Durable Consumption**: Authorization consumption is durable and permanent in SQLite (`state = 'consumed'`). It is **not** automatically reversed or restored if downstream blockchain broadcasting fails, reverts on-chain, or is dropped from the mempool.
-> - **Per-Action Ceiling**: `maxAmount` is strictly an inclusive per-action ceiling for a single transaction, not a cumulative or rolling spending budget across multiple transactions.
+> - **Spending Limits & Cumulative Budgets**: `maxAmount` is strictly an inclusive per-action ceiling for a single transaction. In addition, policies can optionally configure a stateful cumulative spending budget (`budget: { window: "HOURLY" | "DAILY", maxCumulativeAmount: string }`) enforced atomically within SQLite write transactions.
 
 ## Status
 
@@ -71,7 +71,7 @@ engine.keys.register({
   status: "active",
 });
 
-// 3. Register a policy
+// 3. Register a policy (with optional cumulative hourly/daily budget)
 const policy: DemoPolicy = {
   version: 1,
   policyId: "transfer-limit-policy",
@@ -82,6 +82,10 @@ const policy: DemoPolicy = {
   validFrom: 0,
   expiresAt: 2_000_000_000,
   revoked: false,
+  budget: {
+    window: "HOURLY", // "HOURLY" or "DAILY" (fixed UTC windows)
+    maxCumulativeAmount: "2500000000", // uint256 decimal string
+  },
 };
 engine.policies.register(policy);
 
@@ -171,7 +175,7 @@ The engine strictly returns one of three decisions:
   - *Wallet Keys (secp256k1)*: Ethereum private keys used on-chain to sign EVM transactions. The Web3User SDK never handles, stores, or accesses wallet private keys.
 - **Private Key Safety**: Never hardcode private keys in source code. Load private keys from secure environment variables, KMS, or HSMs. The SDK never logs, serializes, or echoes private key material in error messages.
 - **Host Clock Synchronization for Multi-Process Deployments**: When multiple worker processes share an SQLite database, `ClockGuard` checks candidate timestamps against the shared SQLite `high_water_seconds`. Any backward step relative to that mark is rejected as a rollback. Host servers should run continuous NTP daemons (`chrony` or `systemd-timesyncd`). While minimizing drift (e.g. keeping clock drift within an operational target of ~100ms) reduces the likelihood of interleaving collisions between distributed workers, no sub-second offset is a universally guaranteed safe threshold under arbitrary scheduling, network latency, or process interleaving.
-- **Per-Action Spending Limits vs. Cumulative Budgets**: `maxAmount` is an inclusive per-action ceiling for a single transaction. It does not enforce a cumulative, aggregate, or rolling time-window spending budget across multiple transactions. Applications requiring cumulative volume caps must enforce them at the application or orchestration layer.
+- **Per-Action Ceilings vs. Cumulative Budgets**: `maxAmount` defines an inclusive per-action ceiling for any single transaction. To enforce aggregate spending limits across transactions, policies can optionally configure `budget: { window: "HOURLY" | "DAILY", maxCumulativeAmount: string }`. Cumulative budgets are enforced atomically inside SQLite write locks during consumption, preventing race-condition overruns even across multiple processes. Unbudgeted policies operate purely on per-action limits.
 - **Durable Consumption & Downstream Broadcast Failures**: Authorization consumption transitions the database state to `consumed` permanently. If the subsequent blockchain transaction reverts on-chain, fails to broadcast, or is dropped from the mempool, Web3User does not automatically roll back or reverse the consumption. Relayers must manage transaction failures by requesting a fresh authorization under a new authorization ID.
 - **Privileged Store Access**: `engine.getStore()` is provided strictly for administrative maintenance and diagnostics. Executing raw SQL directly on the underlying connection bypasses engine validations and ClockGuard safeguards.
 
@@ -191,7 +195,7 @@ This is a local authorization demonstration only. An `ALLOW` result does not mea
 
 - **Supported Transaction Format**: Currently restricted to the standard ERC-20 `transfer(address,uint256)` function selector (`0xa9059cbb`) with exactly 68 bytes of calldata (4-byte selector and two 32-byte ABI arguments). Other selectors, arbitrary contract calls, or malformed encodings return `UNKNOWN` or `DENY`.
 - **Policy Allowlisting**: Enforces case-insensitive address allowlists for the ERC-20 token contract (`allowedTarget`) and the recipient (`allowedRecipient`).
-- **Spending Limits Boundary**: Enforces an inclusive per-action maximum transfer amount (`maxAmount`). It does **not** provide cumulative, aggregate, or rolling time-window spending budgets across multiple transactions.
+- **Spending Limits Boundary**: Enforces an inclusive per-action maximum transfer amount (`maxAmount`), with optional support for stateful cumulative budgets (`HOURLY` or `DAILY`) enforced atomically in SQLite.
 - **Authority and Invalidation**: V3 authorizations bind the authoritative policy revision and issuer key state in SQLite. Restoring or modifying a policy increments its revision and permanently invalidates prior authorizations.
 
 ## Safety and Operational Boundaries
@@ -199,5 +203,5 @@ This is a local authorization demonstration only. An `ALLOW` result does not mea
 - **Not an On-Chain Enforcer**: Web3User operates strictly off-chain. It does not monitor mempools, intercept RPC traffic, or communicate directly with blockchain consensus. Callers must fail closed on `DENY` or `UNKNOWN` and must verify authorization before requesting user wallet signatures.
 - **Durable Local Storage Required**: SQLite WAL mode requires shared memory (`-shm`) and POSIX byte-range file locking. Network filesystems (NFS, SMB/CIFS, AWS EFS, Azure Files, GlusterFS) are strictly unsupported and risk database corruption, locking deadlocks, or `SQLITE_BUSY` errors. The database must reside on directly attached local block storage.
 - **Durable Consumption Without Automatic Reversal**: An `ALLOW` consumption reservation is durable and permanent in SQLite (`state = 'consumed'`). It is not automatically reversed if downstream on-chain broadcasting fails, times out, reverts, or is dropped from the mempool.
-- **Per-Action Limit Only**: `maxAmount` bounds each individual action and does not limit cumulative multi-transaction spending.
+- **Dual Spending Controls**: `maxAmount` bounds each individual action; optional `budget` limits cumulative spending across transactions within fixed UTC hourly or daily windows.
 - **Pre-Release Audit Notice**: This release candidate is not audited for production deployment. Do not use it as the sole security control for high-value mainnet treasuries or unmonitored autonomous execution.

@@ -33,6 +33,26 @@ export function isUint256String(value) {
   }
 }
 
+export const BUDGET_WINDOW_SECONDS = {
+  HOURLY: 3600,
+  DAILY: 86400,
+};
+
+export function calculateBudgetWindowStart(effectiveNowSeconds, window) {
+  if (!isNonNegativeSafeInteger(effectiveNowSeconds)) {
+    throw new Error(`effectiveNowSeconds must be a non-negative safe integer, received: ${effectiveNowSeconds}`);
+  }
+  const duration = BUDGET_WINDOW_SECONDS[window];
+  if (!duration) {
+    throw new Error(`Invalid budget window type: ${window}`);
+  }
+  return Math.floor(effectiveNowSeconds / duration) * duration;
+}
+
+export function calculateBudgetWindowEnd(effectiveNowSeconds, window) {
+  return calculateBudgetWindowStart(effectiveNowSeconds, window) + BUDGET_WINDOW_SECONDS[window];
+}
+
 export function normalizeDemoPolicy(input) {
   if (!isRecord(input)) return null;
 
@@ -69,6 +89,19 @@ export function normalizeDemoPolicy(input) {
     return null;
   }
 
+  let normalizedBudget = undefined;
+  if ("budget" in input && input.budget !== undefined && input.budget !== null) {
+    if (!isRecord(input.budget)) return null;
+    const { window, maxCumulativeAmount } = input.budget;
+    if (window !== "HOURLY" && window !== "DAILY") return null;
+    if (!isUint256String(maxCumulativeAmount)) return null;
+    if (BigInt(maxAmount) > BigInt(maxCumulativeAmount)) return null;
+    normalizedBudget = {
+      window,
+      maxCumulativeAmount,
+    };
+  }
+
   return {
     version: 1,
     policyId,
@@ -79,6 +112,7 @@ export function normalizeDemoPolicy(input) {
     validFrom,
     expiresAt,
     revoked,
+    ...(normalizedBudget ? { budget: normalizedBudget } : {}),
   };
 }
 
@@ -206,6 +240,35 @@ export function evaluate(policyInput, actionInput, contextInput) {
     };
   }
 
+  if (
+    policy.budget &&
+    isRecord(contextInput) &&
+    contextInput.currentWindowSpent !== undefined &&
+    contextInput.currentWindowSpent !== null
+  ) {
+    if (
+      typeof contextInput.currentWindowSpent !== "string" ||
+      !isUint256String(contextInput.currentWindowSpent)
+    ) {
+      return {
+        decision: "UNKNOWN",
+        reasons: [
+          "Evaluation context currentWindowSpent must be a valid uint256 decimal string.",
+        ],
+      };
+    }
+    const priorSpent = BigInt(contextInput.currentWindowSpent);
+    const cumulativeLimit = BigInt(policy.budget.maxCumulativeAmount);
+    if (priorSpent + decoded.amount > cumulativeLimit) {
+      return {
+        decision: "DENY",
+        reasons: [
+          `Amount exceeds the cumulative spending budget for the ${policy.budget.window.toLowerCase()} window.`,
+        ],
+      };
+    }
+  }
+
   return {
     decision: "ALLOW",
     reasons: [
@@ -290,6 +353,30 @@ export function evaluateDetailed(policyInput, actionInput, contextInput) {
       message: policy && decoded
         ? (decoded.amount <= BigInt(policy.maxAmount) ? "Transfer amount is within per-action maxAmount limit" : "Transfer amount exceeds per-action maxAmount limit")
         : "Missing amount or policy",
+    },
+    {
+      id: "cumulative_budget",
+      name: policy && policy.budget ? `Cumulative Budget Limit (${policy.budget.window})` : "Cumulative Budget Limit",
+      passed: policy
+        ? (policy.budget
+            ? (decoded && isRecord(contextInput) && typeof contextInput.currentWindowSpent === "string" && isUint256String(contextInput.currentWindowSpent)
+                ? BigInt(contextInput.currentWindowSpent) + decoded.amount <= BigInt(policy.budget.maxCumulativeAmount)
+                : false)
+            : true)
+        : false,
+      message: policy
+        ? (policy.budget
+            ? (isRecord(contextInput) && typeof contextInput.currentWindowSpent === "string"
+                ? (isUint256String(contextInput.currentWindowSpent)
+                    ? (decoded
+                        ? (BigInt(contextInput.currentWindowSpent) + decoded.amount <= BigInt(policy.budget.maxCumulativeAmount)
+                            ? `Transfer is within cumulative ${policy.budget.window.toLowerCase()} budget (${(BigInt(contextInput.currentWindowSpent) + decoded.amount).toString(10)} / ${policy.budget.maxCumulativeAmount})`
+                            : `Transfer exceeds cumulative ${policy.budget.window.toLowerCase()} budget (${(BigInt(contextInput.currentWindowSpent) + decoded.amount).toString(10)} > ${policy.budget.maxCumulativeAmount})`)
+                        : "Calldata cannot be decoded to verify cumulative budget")
+                    : "Evaluation context currentWindowSpent must be a valid uint256 decimal string")
+                : "Evaluation context must provide currentWindowSpent as a decimal uint256 string for budgeted policies")
+            : "No cumulative budget configured for this policy (unconstrained)")
+        : "Missing policy",
     },
   ];
 

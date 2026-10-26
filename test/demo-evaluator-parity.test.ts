@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { evaluate as sdkEvaluate, type DemoPolicy, type EvaluationContext, type ProposedAction } from "../src/policy.js";
+import {
+  evaluate as sdkEvaluate,
+  calculateBudgetWindowStart as sdkCalcStart,
+  calculateBudgetWindowEnd as sdkCalcEnd,
+  type DemoPolicy,
+  type EvaluationContext,
+  type ProposedAction,
+} from "../src/policy.js";
 import {
   evaluate as demoEvaluate,
   evaluateDetailed,
   encodeTransferCalldata,
+  calculateBudgetWindowStart as demoCalcStart,
+  calculateBudgetWindowEnd as demoCalcEnd,
   type EvaluationCheck,
 } from "../website-preview/js/evaluator.js";
 
@@ -148,5 +157,62 @@ describe("Client Evaluator Parity with SDK src/policy.ts", () => {
     const encoded = encodeTransferCalldata(RECIPIENT, "500000000");
     expect(encoded.slice(0, 10)).toBe("0xa9059cbb");
     expect(encoded).toBe(buildCalldata(SELECTOR, 500000000n, RECIPIENT));
+  });
+
+  describe("Milestone 8: Budget Parity & Verification", () => {
+    const budgetedPolicy: DemoPolicy = {
+      ...basePolicy,
+      maxAmount: "100",
+      budget: {
+        window: "HOURLY",
+        maxCumulativeAmount: "200",
+      },
+    };
+
+    it("matches SDK on window calculation functions", () => {
+      const timestamps = [0, 1800000000, 1800000001, 1800003599, 1800003600];
+      for (const t of timestamps) {
+        expect(demoCalcStart(t, "HOURLY")).toBe(sdkCalcStart(t, "HOURLY"));
+        expect(demoCalcEnd(t, "HOURLY")).toBe(sdkCalcEnd(t, "HOURLY"));
+        expect(demoCalcStart(t, "DAILY")).toBe(sdkCalcStart(t, "DAILY"));
+        expect(demoCalcEnd(t, "DAILY")).toBe(sdkCalcEnd(t, "DAILY"));
+      }
+    });
+
+    it("matches SDK when transfer is within cumulative budget (ALLOW)", () => {
+      verifyParity(budgetedPolicy, baseAction, {
+        ...baseContext,
+        currentWindowSpent: "100",
+      });
+      const detailed = evaluateDetailed(budgetedPolicy, baseAction, {
+        ...baseContext,
+        currentWindowSpent: "100",
+      });
+      expect(detailed.decision).toBe("ALLOW");
+      const budgetCheck = detailed.checks.find((c: EvaluationCheck) => c.id === "cumulative_budget");
+      expect(budgetCheck).toBeDefined();
+      expect(budgetCheck?.passed).toBe(true);
+    });
+
+    it("matches SDK when transfer exceeds cumulative budget (DENY)", () => {
+      // 160 prior + 50 action = 210 > 200
+      verifyParity(budgetedPolicy, baseAction, {
+        ...baseContext,
+        currentWindowSpent: "160",
+      });
+      const detailed = evaluateDetailed(budgetedPolicy, baseAction, {
+        ...baseContext,
+        currentWindowSpent: "160",
+      });
+      expect(detailed.decision).toBe("DENY");
+      const budgetCheck = detailed.checks.find((c: EvaluationCheck) => c.id === "cumulative_budget");
+      expect(budgetCheck).toBeDefined();
+      expect(budgetCheck?.passed).toBe(false);
+      expect(budgetCheck?.message).toContain("Transfer exceeds cumulative hourly budget");
+    });
+
+    it("matches SDK when currentWindowSpent is omitted for budgeted policy", () => {
+      verifyParity(budgetedPolicy, baseAction, baseContext);
+    });
   });
 });

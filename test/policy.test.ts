@@ -2,8 +2,14 @@
 import { describe, expect, it } from "vitest";
 import {
   evaluate,
+  normalizeDemoPolicy,
+  calculateBudgetWindowStart,
+  calculateBudgetWindowEnd,
+  BUDGET_WINDOW_SECONDS,
+  type BudgetWindowType,
   type DemoPolicy,
   type EvaluationContext,
+  type PolicyBudgetConfig,
   type ProposedAction,
 } from "../src/policy.js";
 
@@ -352,5 +358,157 @@ describe("Web3User demo policy evaluator", () => {
         calldata: `0x${"a".repeat(8194)}`,
       }).decision,
     ).toBe("UNKNOWN");
+  });
+
+  describe("Milestone 8: Stateful Cumulative Budget Invariants", () => {
+    it("calculates deterministic hourly and daily window boundaries", () => {
+      const t = 1_800_000_123;
+      const hourlyStart = calculateBudgetWindowStart(t, "HOURLY");
+      const hourlyEnd = calculateBudgetWindowEnd(t, "HOURLY");
+      expect(hourlyStart).toBe(1_800_000_000);
+      expect(hourlyEnd).toBe(1_800_003_600);
+      expect(hourlyEnd - hourlyStart).toBe(BUDGET_WINDOW_SECONDS.HOURLY);
+
+      const dailyStart = calculateBudgetWindowStart(t, "DAILY");
+      const dailyEnd = calculateBudgetWindowEnd(t, "DAILY");
+      expect(dailyStart).toBe(Math.floor(t / 86400) * 86400);
+      expect(dailyEnd).toBe(dailyStart + 86400);
+      expect(dailyEnd - dailyStart).toBe(BUDGET_WINDOW_SECONDS.DAILY);
+
+      // Boundary tests
+      expect(calculateBudgetWindowStart(1_800_000_000, "HOURLY")).toBe(1_800_000_000);
+      expect(calculateBudgetWindowStart(1_800_003_599, "HOURLY")).toBe(1_800_000_000);
+      expect(calculateBudgetWindowStart(1_800_003_600, "HOURLY")).toBe(1_800_003_600);
+
+      // Rejects invalid timestamps or window types
+      expect(() => calculateBudgetWindowStart(-1, "HOURLY")).toThrow();
+      expect(() => calculateBudgetWindowStart(NaN, "HOURLY")).toThrow();
+      expect(() => calculateBudgetWindowStart(100, "WEEKLY" as BudgetWindowType)).toThrow();
+    });
+
+    it("normalizes policies with valid cumulative budget configuration", () => {
+      const budgeted: DemoPolicy = {
+        ...policy,
+        maxAmount: "500",
+        budget: {
+          window: "HOURLY",
+          maxCumulativeAmount: "2000",
+        },
+      };
+      const normalized = normalizeDemoPolicy(budgeted);
+      expect(normalized).not.toBeNull();
+      expect(normalized?.budget).toEqual({
+        window: "HOURLY",
+        maxCumulativeAmount: "2000",
+      });
+    });
+
+    it("rejects policies where per-action maxAmount exceeds cumulative budget", () => {
+      const invalidPolicy: DemoPolicy = {
+        ...policy,
+        maxAmount: "2500",
+        budget: {
+          window: "HOURLY",
+          maxCumulativeAmount: "2000",
+        },
+      };
+      expect(normalizeDemoPolicy(invalidPolicy)).toBeNull();
+    });
+
+    it("rejects policies with invalid budget window or maxCumulativeAmount", () => {
+      expect(
+        normalizeDemoPolicy({
+          ...policy,
+          budget: {
+            window: "MONTHLY" as unknown as BudgetWindowType,
+            maxCumulativeAmount: "1000",
+          },
+        }),
+      ).toBeNull();
+
+      expect(
+        normalizeDemoPolicy({
+          ...policy,
+          budget: {
+            window: "HOURLY",
+            maxCumulativeAmount: "-50",
+          },
+        }),
+      ).toBeNull();
+    });
+
+    it("handles currentWindowSpent context when evaluating budgeted policy", () => {
+      const budgeted: DemoPolicy = {
+        ...policy,
+        maxAmount: "500",
+        budget: {
+          window: "HOURLY",
+          maxCumulativeAmount: "1000",
+        },
+      };
+      // When context.currentWindowSpent is omitted, per-action checks are evaluated without cumulative check
+      const res1 = evaluate(budgeted, action, context);
+      expect(res1.decision).toBe("ALLOW");
+
+      // Invalid currentWindowSpent returns UNKNOWN
+      const res2 = evaluate(budgeted, action, { ...context, currentWindowSpent: "invalid" });
+      expect(res2.decision).toBe("UNKNOWN");
+      expect(res2.reasons[0]).toContain("must be a valid uint256 decimal string");
+    });
+
+    it("evaluates cumulative budget correctly against prior spend", () => {
+      const budgeted: DemoPolicy = {
+        ...policy,
+        maxAmount: "500",
+        budget: {
+          window: "HOURLY",
+          maxCumulativeAmount: "1000",
+        },
+      };
+      // action amount is 50. Prior spend 900. Total = 950 <= 1000 -> ALLOW
+      const allowRes = evaluate(budgeted, action, {
+        ...context,
+        currentWindowSpent: "900",
+      });
+      expect(allowRes.decision).toBe("ALLOW");
+
+      // Exactly at limit: Prior spend 950. 950 + 50 = 1000 <= 1000 -> ALLOW
+      const boundaryRes = evaluate(budgeted, action, {
+        ...context,
+        currentWindowSpent: "950",
+      });
+      expect(boundaryRes.decision).toBe("ALLOW");
+
+      // Exceeds limit: Prior spend 951. 951 + 50 = 1001 > 1000 -> DENY
+      const denyRes = evaluate(budgeted, action, {
+        ...context,
+        currentWindowSpent: "951",
+      });
+      expect(denyRes.decision).toBe("DENY");
+      expect(denyRes.reasons[0]).toContain("Amount exceeds the cumulative spending budget for the hourly window.");
+    });
+
+    it("enforces dual limit: per-action maxAmount triggers DENY even if cumulative budget has room", () => {
+      const budgeted: DemoPolicy = {
+        ...policy,
+        maxAmount: "500",
+        budget: {
+          window: "HOURLY",
+          maxCumulativeAmount: "10000",
+        },
+      };
+      // Action amount 600 exceeds per-action 500, even though 0 + 600 <= 10000
+      const res = evaluate(
+        budgeted,
+        {
+          ...action,
+          calldata: calldata(SELECTOR, 600n),
+          amount: "600",
+        },
+        { ...context, currentWindowSpent: "0" },
+      );
+      expect(res.decision).toBe("DENY");
+      expect(res.reasons[0]).toContain("Amount exceeds the per-action policy limit.");
+    });
   });
 });

@@ -97,6 +97,13 @@ export {
   type EvaluationContext,
   type Evaluation,
   type Decision,
+  type BudgetWindowType,
+  type PolicyBudgetConfig,
+  type DecodedTransfer,
+  BUDGET_WINDOW_SECONDS,
+  calculateBudgetWindowStart,
+  calculateBudgetWindowEnd,
+  decodeTransfer,
   normalizeDemoPolicy,
   evaluate,
 } from "./policy.js";

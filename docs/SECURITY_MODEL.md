@@ -14,7 +14,7 @@ An `ALLOW` result is not transaction execution or an on-chain guarantee. It repr
 
 **Core Invariants and Operational Realities:**
 - **Durable Consumption**: Once consumed in SQLite (`state = 'consumed'`), the authorization transition is durable and permanent. If downstream blockchain broadcasting fails, reverts on-chain, or is dropped from the mempool, the SDK does **not** automatically roll back or reverse the consumption.
-- **Per-Action Ceiling vs. Cumulative Budget**: `maxAmount` is an inclusive per-action ceiling for a single transaction. It does not enforce a cumulative, aggregate, or rolling time-window spending budget across multiple transactions.
+- **Per-Action Ceilings & Stateful Cumulative Budgets**: `maxAmount` defines an inclusive per-action ceiling for any single transaction. In addition, policies can configure an optional cumulative spending budget (`budget: { window: "HOURLY" | "DAILY", maxCumulativeAmount: string }`). When configured, cumulative spending is tracked and enforced atomically inside the SQLite write lock during consumption.
 - **Local Block Storage Only**: SQLite WAL mode requires POSIX advisory file locking and shared memory (`-shm`). Network-mounted storage (such as NFS, SMB/CIFS, AWS EFS, Azure Files, or GlusterFS) is strictly unsupported due to locking desynchronization and corruption hazards.
 
 ## 2. Supported Transaction Format
@@ -46,20 +46,42 @@ This prototype does not establish that the target address contains a
 verified or trustworthy token contract. A production system needs chain
 identity and contract verification appropriate to its threat model.
 
-## 4. Amount Validation
+## 4. Amount Validation & Stateful Cumulative Budget Enforcement
 
-Amounts are unsigned decimal integer strings bounded to uint256.
-`BigInt` is used to avoid floating-point precision loss.
+Amounts are unsigned decimal integer strings bounded to uint256 (up to 78 digits).
+JavaScript native `BigInt` is strictly used for all arithmetic and limit comparisons to avoid floating-point precision loss.
 
-The amount is decoded from the actual calldata. The compatibility
+The amount is decoded directly from the ABI calldata. The compatibility
 field `action.amount` must match the decoded amount; it is not the
 authoritative amount used for the limit check.
 
-`maxAmount` is an inclusive PER-ACTION maximum. An amount equal to
-the maximum is allowed; an amount above it is denied.
+### Dual Limit Model: Per-Action Ceiling vs Cumulative Budget
 
-This is not a cumulative spending budget. Multiple individually
-permitted transfers can exceed a desired aggregate budget.
+1. **Per-Action Ceiling (`maxAmount`)**:
+   `maxAmount` is an inclusive PER-ACTION maximum. An amount equal to the maximum is allowed; an amount above it is denied immediately during policy evaluation.
+
+2. **Stateful Cumulative Budget (`budget?: PolicyBudgetConfig`)**:
+   Policies can optionally configure an aggregate spending limit over fixed time windows:
+   - `window`: `"HOURLY"` (3,600s, fixed UTC hour) or `"DAILY"` (86,400s, fixed UTC day).
+   - `maxCumulativeAmount`: unsigned decimal uint256 string.
+   - **Invariant**: `maxAmount <= maxCumulativeAmount`. A policy's single-action ceiling cannot exceed its cumulative window budget.
+
+3. **Atomic Accounting & Concurrency Control**:
+   Cumulative spending is tracked in SQLite table `policy_budget_accumulators` keyed by `(policy_id, window_type, window_start)`. All budget validations and updates occur atomically inside the `BEGIN IMMEDIATE` write transaction boundary during `consumeSignedTransactionAuthorizationV3`. Concurrent multi-process requests serialize through the SQLite lock, preventing race-condition budget overruns.
+
+4. **Window Rollover & Audit History**:
+   Window boundaries derive deterministically from trusted monotonic time (`effectiveNowSeconds`):
+   $$\text{windowStart} = \lfloor \frac{\text{effectiveNowSeconds}}{\text{windowDuration}} \rfloor \times \text{windowDuration}$$
+   Rollover is automatic and daemon-free: when the clock advances into a new bucket, a fresh allocation is available immediately. Historical window records remain immutable for auditability.
+
+5. **Budget Exhaustion & Safe Retry Semantics**:
+   When an authorization is denied due to budget exhaustion, the transaction issues `ROLLBACK;`. The authorization record in `consumed_authorization_ids` remains in `state = 'issued'`. It may be retried while still valid (e.g. after window rollover or an administrative policy budget expansion). Every retry re-executes all expiry, signature, revocation, policy revision, and replay checks. Once successfully consumed, replay protection permanently prevents reuse.
+
+6. **Policy Revision Carry-Forward & Window Immutability**:
+   Spending accumulates against `policy_id` and the active window start. Updating a policy to a new revision carries prior spending forward within the same window. Mutating the configured `window` type (`HOURLY` vs `DAILY`) on an existing policy identity is strictly rejected across all mutation and restoration paths, including across intervening unbudgeted revisions, to preserve deterministic governance boundaries.
+
+7. **Supported Action & Calldata Scope**:
+   Cumulative budget accounting currently supports standard ERC-20 `transfer(address,uint256)` (`0xa9059cbb`) calldata only. Calldata is decoded strictly via `decodeTransfer()` to extract the transfer recipient and amount. Any action or calldata that cannot be decoded safely as an ERC-20 transfer fails closed immediately during budget evaluation (`UNKNOWN` decision), rolling back the consumption transaction. The SDK intentionally does not broaden action support or parse arbitrary calldata for budget accumulation.
 
 ## 5. Trusted Time and Policy Validity
 

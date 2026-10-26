@@ -35,7 +35,14 @@ import {
 } from "./sqlite-transaction.js";
 import type { KeyRegistry } from "./key-registry.js";
 import { prepareTransactionAuthorization } from "./policy-transaction.js";
-import { normalizeDemoPolicy, type Evaluation } from "./policy.js";
+import {
+  normalizeDemoPolicy,
+  decodeTransfer,
+  BUDGET_WINDOW_SECONDS,
+  calculateBudgetWindowStart,
+  type BudgetWindowType,
+  type Evaluation,
+} from "./policy.js";
 
 const consumedEnvelopes = new WeakSet<object>();
 const consumedAuthorizationIds = new Set<string>();
@@ -1270,6 +1277,51 @@ export function consumeSignedTransactionAuthorizationV3(
     if (computedBindingDigest !== artifact.bindingDigest) {
       db.exec("ROLLBACK;");
       return deny("Transaction does not match the bound authorization artifact.");
+    }
+
+    // 8b. Milestone 8: Enforce Cumulative Spending Budget (if configured on authoritative policy)
+    if (authoritativePolicy.budget) {
+      const { window: budgetWindow, maxCumulativeAmount } = authoritativePolicy.budget;
+      const windowStart = calculateBudgetWindowStart(effectiveNowSeconds, budgetWindow);
+
+      const accumRow = db.prepare(`
+        SELECT spent_amount
+        FROM policy_budget_accumulators
+        WHERE policy_id = ? AND window_type = ? AND window_start = ?
+      `).get(authoritativePolicy.policyId, budgetWindow, windowStart) as { spent_amount: string } | undefined;
+
+      const currentSpent = accumRow ? BigInt(accumRow.spent_amount) : 0n;
+      const decoded = decodeTransfer(revalResult.envelope.request.calldata);
+      if (!decoded) {
+        db.exec("ROLLBACK;");
+        return {
+          decision: "UNKNOWN",
+          reasons: ["ERC-20 transfer calldata could not be decoded safely for budget check."],
+        };
+      }
+
+      const actionAmount = decoded.amount;
+      const newSpent = currentSpent + actionAmount;
+      const maxCumulative = BigInt(maxCumulativeAmount);
+
+      if (newSpent > maxCumulative) {
+        db.exec("ROLLBACK;");
+        const available = maxCumulative >= currentSpent ? (maxCumulative - currentSpent).toString(10) : "0";
+        return {
+          decision: "DENY",
+          reasons: [
+            `Cumulative spending budget exceeded for ${budgetWindow.toLowerCase()} window (requested: ${actionAmount.toString(10)}, available: ${available}).`,
+          ],
+        };
+      }
+
+      // Upsert accumulator row atomically inside the write lock
+      db.prepare(`
+        INSERT INTO policy_budget_accumulators (policy_id, window_type, window_start, spent_amount, last_updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT (policy_id, window_type, window_start)
+        DO UPDATE SET spent_amount = excluded.spent_amount, last_updated_at = CURRENT_TIMESTAMP
+      `).run(authoritativePolicy.policyId, budgetWindow, windowStart, newSpent.toString(10));
     }
 
     // 9. Atomically consume the issued authorization record

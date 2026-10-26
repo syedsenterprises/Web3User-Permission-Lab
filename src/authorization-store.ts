@@ -9,6 +9,7 @@ import {
 } from "./clock.js";
 import { SQLiteKeyStore } from "./key-store.js";
 import { SQLitePolicyStore } from "./policy-store.js";
+import { type BudgetWindowType } from "./policy.js";
 import { isFatalIOError, withImmediateTransaction } from "./sqlite-transaction.js";
 
 export * from "./policy-store.js";
@@ -602,6 +603,70 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
         }
       }
     }
+
+    // Milestone 8: Policy budget accumulators for cumulative spending windows
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS policy_budget_accumulators (
+        policy_id TEXT NOT NULL,
+        window_type TEXT NOT NULL CHECK (window_type IN ('HOURLY', 'DAILY')),
+        window_start INTEGER NOT NULL,
+        spent_amount TEXT NOT NULL CHECK (length(spent_amount) <= 78 AND spent_amount GLOB '[0-9]*'),
+        last_updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (policy_id, window_type, window_start),
+        FOREIGN KEY (policy_id) REFERENCES policies(policy_id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_budget_accumulators_lookup
+        ON policy_budget_accumulators (policy_id, window_type, window_start);
+    `);
+  }
+
+  /**
+   * Retrieves the current accumulated spend for a specific policy and window bucket.
+   */
+  getPolicyBudgetAccumulator(
+    policyId: string,
+    windowType: BudgetWindowType,
+    windowStart: number,
+  ): { spentAmount: string; lastUpdatedAt: string } | null {
+    if (this.isTainted()) {
+      throw new Error(`SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`);
+    }
+    const row = this.db.prepare(`
+      SELECT spent_amount, last_updated_at
+      FROM policy_budget_accumulators
+      WHERE policy_id = ? AND window_type = ? AND window_start = ?
+    `).get(policyId, windowType, windowStart) as { spent_amount: string; last_updated_at: string } | undefined;
+
+    return row ? { spentAmount: row.spent_amount, lastUpdatedAt: row.last_updated_at } : null;
+  }
+
+  /**
+   * Lists all historical budget accumulator buckets for a policy.
+   */
+  listPolicyBudgetAccumulators(
+    policyId: string,
+  ): Array<{ windowType: BudgetWindowType; windowStart: number; spentAmount: string; lastUpdatedAt: string }> {
+    if (this.isTainted()) {
+      throw new Error(`SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`);
+    }
+    const rows = this.db.prepare(`
+      SELECT window_type, window_start, spent_amount, last_updated_at
+      FROM policy_budget_accumulators
+      WHERE policy_id = ?
+      ORDER BY window_start DESC
+    `).all(policyId) as Array<{
+      window_type: BudgetWindowType;
+      window_start: number;
+      spent_amount: string;
+      last_updated_at: string;
+    }>;
+
+    return rows.map((r) => ({
+      windowType: r.window_type,
+      windowStart: r.window_start,
+      spentAmount: r.spent_amount,
+      lastUpdatedAt: r.last_updated_at,
+    }));
   }
 
   /**

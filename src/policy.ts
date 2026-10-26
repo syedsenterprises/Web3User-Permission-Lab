@@ -14,6 +14,18 @@
 
 export type Decision = "ALLOW" | "DENY" | "UNKNOWN";
 
+export type BudgetWindowType = "HOURLY" | "DAILY";
+
+export interface PolicyBudgetConfig {
+  /** Fixed time-window interval: HOURLY (3600s) or DAILY (86400s). */
+  readonly window: BudgetWindowType;
+  /**
+   * Maximum aggregate spending permitted across all consumed transactions
+   * within a single window bucket, formatted as a base-10 uint256 string.
+   */
+  readonly maxCumulativeAmount: string;
+}
+
 export interface DemoPolicy {
   version: 1;
   policyId: string;
@@ -27,6 +39,8 @@ export interface DemoPolicy {
   /** Exclusive expiration boundary. */
   expiresAt: number;
   revoked: boolean;
+  /** Optional cumulative spending budget across transactions within a time window. */
+  budget?: PolicyBudgetConfig;
 }
 
 export interface ProposedAction {
@@ -44,6 +58,28 @@ export interface ProposedAction {
 export interface EvaluationContext {
   /** Trusted current Unix timestamp in seconds. */
   nowSeconds: number;
+  /** Optional prior spent amount in the current window (primarily used for simulation / evaluation testing). */
+  currentWindowSpent?: string;
+}
+
+export const BUDGET_WINDOW_SECONDS: Record<BudgetWindowType, number> = {
+  HOURLY: 3600,
+  DAILY: 86400,
+};
+
+export function calculateBudgetWindowStart(effectiveNowSeconds: number, window: BudgetWindowType): number {
+  if (!isNonNegativeSafeInteger(effectiveNowSeconds)) {
+    throw new Error(`effectiveNowSeconds must be a non-negative safe integer, received: ${effectiveNowSeconds}`);
+  }
+  const duration = BUDGET_WINDOW_SECONDS[window];
+  if (!duration) {
+    throw new Error(`Invalid budget window type: ${window}`);
+  }
+  return Math.floor(effectiveNowSeconds / duration) * duration;
+}
+
+export function calculateBudgetWindowEnd(effectiveNowSeconds: number, window: BudgetWindowType): number {
+  return calculateBudgetWindowStart(effectiveNowSeconds, window) + BUDGET_WINDOW_SECONDS[window];
 }
 
 export interface Evaluation {
@@ -137,6 +173,19 @@ export function normalizeDemoPolicy(input: unknown): DemoPolicy | null {
     return null;
   }
 
+  let normalizedBudget: PolicyBudgetConfig | undefined;
+  if ("budget" in input && input.budget !== undefined && input.budget !== null) {
+    if (!isRecord(input.budget)) return null;
+    const { window, maxCumulativeAmount } = input.budget;
+    if (window !== "HOURLY" && window !== "DAILY") return null;
+    if (!isUint256String(maxCumulativeAmount)) return null;
+    if (BigInt(maxAmount) > BigInt(maxCumulativeAmount)) return null;
+    normalizedBudget = {
+      window,
+      maxCumulativeAmount,
+    };
+  }
+
   return {
     version: 1,
     policyId,
@@ -147,6 +196,7 @@ export function normalizeDemoPolicy(input: unknown): DemoPolicy | null {
     validFrom,
     expiresAt,
     revoked,
+    ...(normalizedBudget ? { budget: normalizedBudget } : {}),
   };
 }
 
@@ -176,12 +226,12 @@ function parseAction(input: unknown): ParsedAction | null {
   return { target, calldata, claimedAmount: amount };
 }
 
-interface DecodedTransfer {
+export interface DecodedTransfer {
   recipient: string;
   amount: bigint;
 }
 
-function decodeTransfer(calldata: string): DecodedTransfer | null {
+export function decodeTransfer(calldata: string): DecodedTransfer | null {
   if (calldata.slice(0, 10).toLowerCase() !== ERC20_TRANSFER_SELECTOR) {
     return null;
   }
@@ -284,6 +334,32 @@ export function evaluate(
       decision: "DENY",
       reasons: ["Amount exceeds the per-action policy limit."],
     };
+  }
+
+  if (
+    policy.budget &&
+    isRecord(contextInput) &&
+    contextInput.currentWindowSpent !== undefined &&
+    contextInput.currentWindowSpent !== null
+  ) {
+    if (
+      typeof contextInput.currentWindowSpent !== "string" ||
+      !isUint256String(contextInput.currentWindowSpent)
+    ) {
+      return unknownResult(
+        "Evaluation context currentWindowSpent must be a valid uint256 decimal string.",
+      );
+    }
+    const priorSpent = BigInt(contextInput.currentWindowSpent);
+    const cumulativeLimit = BigInt(policy.budget.maxCumulativeAmount);
+    if (priorSpent + decoded.amount > cumulativeLimit) {
+      return {
+        decision: "DENY",
+        reasons: [
+          `Amount exceeds the cumulative spending budget for the ${policy.budget.window.toLowerCase()} window.`,
+        ],
+      };
+    }
   }
 
   return {

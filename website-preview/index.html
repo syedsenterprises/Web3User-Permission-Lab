@@ -168,8 +168,18 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
       <span class="status current">CURRENT RC</span>
     </div>
     <div class="milestone">
-      <div class="id">M7&ndash;M9</div>
-      <div><strong>Budgets, Replay Controls, Adversarial Testing, &amp; Independent Review</strong><p>Cumulative budgets, external wallet boundaries, and independent third-party audits before production consideration.</p></div>
+      <div class="id">M7</div>
+      <div><strong>Interactive Policy Playground &amp; Parity Test Suite</strong><p>Zero-dependency client-side evaluator with representative presets and parity verification against core SDK.</p></div>
+      <span class="status">COMPLETE</span>
+    </div>
+    <div class="milestone">
+      <div class="id">M8</div>
+      <div><strong>Stateful Cumulative Budget Enforcement</strong><p>Atomic hourly/daily cumulative budget caps enforced within SQLite write transactions with carry-forward across revisions.</p></div>
+      <span class="status current">CURRENT</span>
+    </div>
+    <div class="milestone">
+      <div class="id">M9</div>
+      <div><strong>External Wallet Boundaries &amp; Independent Security Review</strong><p>Universal wallet enforcement boundaries, adversarial fault injection, and formal third-party audit.</p></div>
       <span class="status planned">PLANNED</span>
     </div>
   </div>
@@ -177,7 +187,7 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
 
 <section class="demo-section" id="demo">
   <div class="demo-header">
-    <div class="eyebrow">Milestone 7 &middot; Interactive Demonstration</div>
+    <div class="eyebrow">Interactive Demonstration &middot; Milestone 7 &amp; 8</div>
     <h2>Interactive Policy Evaluator Playground</h2>
     <p>Test real-time off-chain authorization decisions against custom policies and transaction requests. The evaluation logic below executes natively in your browser using pure TypeScript/JavaScript equivalent to <code>src/policy.ts</code>.</p>
   </div>
@@ -221,6 +231,20 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
           <input type="text" id="expires-at" class="form-control" value="1800086400" spellcheck="false">
         </div>
       </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="budget-window">Cumulative Window (M8)</label>
+          <select id="budget-window" class="form-control">
+            <option value="NONE">None (Unconstrained)</option>
+            <option value="HOURLY">HOURLY (Fixed UTC 1h)</option>
+            <option value="DAILY">DAILY (Fixed UTC 24h)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="max-cumulative-amount">Cumulative Budget Cap</label>
+          <input type="text" id="max-cumulative-amount" class="form-control" value="" placeholder="e.g. 1000000000" spellcheck="false">
+        </div>
+      </div>
       <div class="checkbox-group">
         <input type="checkbox" id="policy-revoked">
         <label for="policy-revoked">Revoke this policy (admin kill-switch)</label>
@@ -244,6 +268,10 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
       <div class="form-group">
         <label for="action-amount">Claimed Amount (uint256 units)</label>
         <input type="text" id="action-amount" class="form-control" value="500000000" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="simulated-spent">Simulated Prior Window Spend (M8)</label>
+        <input type="text" id="simulated-spent" class="form-control" value="" placeholder="0 (defaults to 0 if empty)" spellcheck="false">
       </div>
       <div class="form-group">
         <label for="action-calldata">
@@ -300,8 +328,8 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
     <!-- Architecture Boundary Notice -->
     <div class="arch-boundary-box">
       <h4>Architectural Boundary Notice</h4>
-      <p><strong>What is running in your browser:</strong> The policy evaluation, ERC-20 transfer calldata decoding, parameter normalization, and rule checks shown above run 100% client-side in pure JavaScript. No data is transmitted to an external server.</p>
-      <p style="margin-top:8px;"><strong>What requires Node.js runtime:</strong> Full cryptographic Ed25519 authorization signing, monotonic ClockGuard anchoring, and persistent single-use replay protection require the Node.js SDK (<code>Web3UserEngine</code>) with built-in SQLite WAL mode. To test multi-process replay attacks and persistent locking on your machine, run <code>npm run demo:persistent-replay</code>.</p>
+      <p><strong>What is running in your browser:</strong> The policy evaluation, cumulative window budget checks, ERC-20 transfer calldata decoding, parameter normalization, and rule checks shown above run 100% client-side in pure JavaScript. No data is transmitted to an external server.</p>
+      <p style="margin-top:8px;"><strong>What requires Node.js runtime:</strong> Full cryptographic Ed25519 authorization signing, monotonic ClockGuard anchoring, persistent single-use replay protection, and multi-process atomic budget accumulators require the Node.js SDK (<code>Web3UserEngine</code>) with built-in SQLite WAL mode. To test multi-process replay attacks and persistent locking on your machine, run <code>npm run demo:persistent-replay</code>.</p>
     </div>
   </div>
 </section>
@@ -309,7 +337,7 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
 <section>
   <h2>Technical Snapshot</h2>
   <p class="muted">Language: TypeScript &middot; Tooling: Node.js (&gt;=22.13.0), npm, Vitest &middot; Storage: SQLite (built-in node:sqlite, WAL mode) &middot; Signatures: Ed25519 (node:crypto) &middot; Version Control: Git &amp; GitHub.</p>
-  <p class="muted">Current supported selector: <code>0xa9059cbb</code> &mdash; ERC-20 <code>transfer(address,uint256)</code>. The prototype enforces single-use persistent replay protection for bound authorizations. Cumulative multi-transaction budgets, arbitrary smart contract parsing, and universal wallet enforcement boundaries are not implemented.</p>
+  <p class="muted">Current supported selector: <code>0xa9059cbb</code> &mdash; ERC-20 <code>transfer(address,uint256)</code>. The prototype enforces single-use persistent replay protection and atomic cumulative budgets over fixed UTC hourly and daily windows. Arbitrary smart contract parsing and universal wallet enforcement boundaries are not implemented.</p>
 </section>
 
 <section>

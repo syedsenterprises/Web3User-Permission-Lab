@@ -5,6 +5,17 @@ export const MAX_UINT256: bigint;
 export const MAX_POLICY_ID_LENGTH: number;
 export const MAX_CALLDATA_HEX_LENGTH: number;
 
+export type BudgetWindowType = "HOURLY" | "DAILY";
+
+export interface PolicyBudgetConfig {
+  readonly window: BudgetWindowType;
+  readonly maxCumulativeAmount: string;
+}
+
+export const BUDGET_WINDOW_SECONDS: Record<BudgetWindowType, number>;
+export function calculateBudgetWindowStart(atSeconds: number, windowType: BudgetWindowType): number;
+export function calculateBudgetWindowEnd(atSeconds: number, windowType: BudgetWindowType): number;
+
 export interface NormalizedDemoPolicy {
   readonly version: 1;
   readonly policyId: string;
@@ -15,6 +26,7 @@ export interface NormalizedDemoPolicy {
   readonly validFrom: number;
   readonly expiresAt: number;
   readonly revoked: boolean;
+  readonly budget?: PolicyBudgetConfig;
 }
 
 export interface ParsedAction {

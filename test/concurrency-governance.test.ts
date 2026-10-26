@@ -62,6 +62,125 @@ describe("Milestone 6.2 Phase 2: Genuine Multi-Process Concurrency Governance", 
     });
   }
 
+  interface RendezvousWorkerResult {
+    workerId: number;
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+  }
+
+  function runRendezvousWorkers(
+    workerScripts: Array<{ workerId: number; code: string }>,
+    timeoutMs = 20000,
+  ): Promise<RendezvousWorkerResult[]> {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const children: Array<{
+        workerId: number;
+        child: ReturnType<typeof fork>;
+        stdout: string;
+        stderr: string;
+        exitCode: number | null;
+      }> = [];
+      const readyWorkers = new Set<number>();
+      let settled = false;
+
+      const cleanupAndKillAll = () => {
+        for (const entry of children) {
+          if (entry.child.exitCode === null && !entry.child.killed) {
+            try {
+              entry.child.kill("SIGKILL");
+            } catch {}
+          }
+        }
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanupAndKillAll();
+        rejectPromise(
+          new Error(
+            `runRendezvousWorkers timed out after ${timeoutMs}ms. Ready workers: ${readyWorkers.size}/${workerScripts.length}. Child statuses: ` +
+              children
+                .map(
+                  (c) =>
+                    `W${c.workerId}(code=${c.exitCode}, ready=${readyWorkers.has(c.workerId)})`,
+                )
+                .join(", "),
+          ),
+        );
+      }, timeoutMs);
+
+      const checkAllExited = () => {
+        const allDone = children.every((c) => c.exitCode !== null);
+        if (allDone && !settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolvePromise(
+            children.map((c) => ({
+              workerId: c.workerId,
+              exitCode: c.exitCode,
+              stdout: c.stdout,
+              stderr: c.stderr,
+            })),
+          );
+        }
+      };
+
+      for (const ws of workerScripts) {
+        const child = fork("-e", [ws.code], {
+          execArgv: ["--input-type=module", "--import", "tsx/esm"],
+          silent: true,
+        });
+
+        const entry = {
+          workerId: ws.workerId,
+          child,
+          stdout: "",
+          stderr: "",
+          exitCode: null as number | null,
+        };
+        children.push(entry);
+
+        child.stdout?.on("data", (d) => {
+          entry.stdout += d.toString();
+        });
+
+        child.stderr?.on("data", (d) => {
+          entry.stderr += d.toString();
+        });
+
+        child.on("message", (msg: unknown) => {
+          if (
+            typeof msg === "object" &&
+            msg !== null &&
+            (msg as { type?: string }).type === "READY"
+          ) {
+            readyWorkers.add(ws.workerId);
+            if (readyWorkers.size === workerScripts.length && !settled) {
+              for (const c of children) {
+                c.child.send("START");
+              }
+            }
+          }
+        });
+
+        child.on("exit", (code) => {
+          entry.exitCode = code;
+          checkAllExited();
+        });
+
+        child.on("error", (err) => {
+          entry.stderr += "\nChild process error: " + err.message;
+          if (entry.exitCode === null) {
+            entry.exitCode = 1;
+          }
+          checkAllExited();
+        });
+      }
+    });
+  }
+
   // 1. Genuine concurrent startup / initialization contention across distinct OS processes
   it("handles overlapping concurrent initialization across distinct OS processes without data loss", async () => {
     const dbFile = databasePath("concurrent-init.sqlite");
@@ -383,128 +502,6 @@ describe("Milestone 6.2 Phase 2: Genuine Multi-Process Concurrency Governance", 
     if (issued.decision !== "ALLOW") throw new Error("Failed to issue test authorization");
     mainStore.close();
 
-    // Define rendezvous barrier coordinator for deterministic race
-    interface RendezvousWorkerResult {
-      workerId: number;
-      exitCode: number | null;
-      stdout: string;
-      stderr: string;
-    }
-
-    function runRendezvousWorkers(
-      workerScripts: Array<{ workerId: number; code: string }>,
-      timeoutMs = 20000,
-    ): Promise<RendezvousWorkerResult[]> {
-      return new Promise((resolvePromise, rejectPromise) => {
-        const children: Array<{
-          workerId: number;
-          child: ReturnType<typeof fork>;
-          stdout: string;
-          stderr: string;
-          exitCode: number | null;
-        }> = [];
-        const readyWorkers = new Set<number>();
-        let settled = false;
-
-        const cleanupAndKillAll = () => {
-          for (const entry of children) {
-            if (entry.child.exitCode === null && !entry.child.killed) {
-              try {
-                entry.child.kill("SIGKILL");
-              } catch {}
-            }
-          }
-        };
-
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          cleanupAndKillAll();
-          rejectPromise(
-            new Error(
-              `runRendezvousWorkers timed out after ${timeoutMs}ms. Ready workers: ${readyWorkers.size}/${workerScripts.length}. Child statuses: ` +
-                children
-                  .map(
-                    (c) =>
-                      `W${c.workerId}(code=${c.exitCode}, ready=${readyWorkers.has(c.workerId)})`,
-                  )
-                  .join(", "),
-            ),
-          );
-        }, timeoutMs);
-
-        const checkAllExited = () => {
-          const allDone = children.every((c) => c.exitCode !== null);
-          if (allDone && !settled) {
-            settled = true;
-            clearTimeout(timer);
-            resolvePromise(
-              children.map((c) => ({
-                workerId: c.workerId,
-                exitCode: c.exitCode,
-                stdout: c.stdout,
-                stderr: c.stderr,
-              })),
-            );
-          }
-        };
-
-        for (const ws of workerScripts) {
-          const child = fork("-e", [ws.code], {
-            execArgv: ["--input-type=module", "--import", "tsx/esm"],
-            silent: true,
-          });
-
-          const entry = {
-            workerId: ws.workerId,
-            child,
-            stdout: "",
-            stderr: "",
-            exitCode: null as number | null,
-          };
-          children.push(entry);
-
-          child.stdout?.on("data", (d) => {
-            entry.stdout += d.toString();
-          });
-
-          child.stderr?.on("data", (d) => {
-            entry.stderr += d.toString();
-          });
-
-          child.on("message", (msg: unknown) => {
-            if (
-              typeof msg === "object" &&
-              msg !== null &&
-              (msg as { type?: string }).type === "READY"
-            ) {
-              readyWorkers.add(ws.workerId);
-              if (readyWorkers.size === workerScripts.length && !settled) {
-                // All workers have initialized their database connections and stand ready at the barrier.
-                // Release all workers simultaneously!
-                for (const c of children) {
-                  c.child.send("START");
-                }
-              }
-            }
-          });
-
-          child.on("exit", (code) => {
-            entry.exitCode = code;
-            checkAllExited();
-          });
-
-          child.on("error", (err) => {
-            entry.stderr += "\nChild process error: " + err.message;
-            if (entry.exitCode === null) {
-              entry.exitCode = 1;
-            }
-            checkAllExited();
-          });
-        }
-      });
-    }
-
     const makeRaceWorker = (workerId: number) => `
       import { SQLiteAuthorizationStore } from './src/authorization-store.js';
       import { TestClock } from './src/clock.js';
@@ -668,125 +665,6 @@ describe("Milestone 6.2 Phase 2: Genuine Multi-Process Concurrency Governance", 
     if (issued.decision !== "ALLOW") throw new Error("Failed to issue test authorization");
     mainStore.close();
 
-    interface RendezvousWorkerResult {
-      workerId: number;
-      exitCode: number | null;
-      stdout: string;
-      stderr: string;
-    }
-
-    function runRendezvousWorkers(
-      workerScripts: Array<{ workerId: number; code: string }>,
-      timeoutMs = 20000,
-    ): Promise<RendezvousWorkerResult[]> {
-      return new Promise((resolvePromise, rejectPromise) => {
-        const children: Array<{
-          workerId: number;
-          child: ReturnType<typeof fork>;
-          stdout: string;
-          stderr: string;
-          exitCode: number | null;
-        }> = [];
-        const readyWorkers = new Set<number>();
-        let settled = false;
-
-        const cleanupAndKillAll = () => {
-          for (const entry of children) {
-            if (entry.child.exitCode === null && !entry.child.killed) {
-              try {
-                entry.child.kill("SIGKILL");
-              } catch {}
-            }
-          }
-        };
-
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          cleanupAndKillAll();
-          rejectPromise(
-            new Error(
-              `runRendezvousWorkers timed out after ${timeoutMs}ms. Ready workers: ${readyWorkers.size}/${workerScripts.length}. Child statuses: ` +
-                children
-                  .map(
-                    (c) =>
-                      `W${c.workerId}(code=${c.exitCode}, ready=${readyWorkers.has(c.workerId)})`,
-                  )
-                  .join(", "),
-            ),
-          );
-        }, timeoutMs);
-
-        const checkAllExited = () => {
-          const allDone = children.every((c) => c.exitCode !== null);
-          if (allDone && !settled) {
-            settled = true;
-            clearTimeout(timer);
-            resolvePromise(
-              children.map((c) => ({
-                workerId: c.workerId,
-                exitCode: c.exitCode,
-                stdout: c.stdout,
-                stderr: c.stderr,
-              })),
-            );
-          }
-        };
-
-        for (const ws of workerScripts) {
-          const child = fork("-e", [ws.code], {
-            execArgv: ["--input-type=module", "--import", "tsx/esm"],
-            silent: true,
-          });
-
-          const entry = {
-            workerId: ws.workerId,
-            child,
-            stdout: "",
-            stderr: "",
-            exitCode: null as number | null,
-          };
-          children.push(entry);
-
-          child.stdout?.on("data", (d) => {
-            entry.stdout += d.toString();
-          });
-
-          child.stderr?.on("data", (d) => {
-            entry.stderr += d.toString();
-          });
-
-          child.on("message", (msg: unknown) => {
-            if (
-              typeof msg === "object" &&
-              msg !== null &&
-              (msg as { type?: string }).type === "READY"
-            ) {
-              readyWorkers.add(ws.workerId);
-              if (readyWorkers.size === workerScripts.length && !settled) {
-                for (const c of children) {
-                  c.child.send("START");
-                }
-              }
-            }
-          });
-
-          child.on("exit", (code) => {
-            entry.exitCode = code;
-            checkAllExited();
-          });
-
-          child.on("error", (err) => {
-            entry.stderr += "\nChild process error: " + err.message;
-            if (entry.exitCode === null) {
-              entry.exitCode = 1;
-            }
-            checkAllExited();
-          });
-        }
-      });
-    }
-
     // Worker 1: Cancel worker
     const cancelWorkerCode = `
       import { SQLiteAuthorizationStore } from './src/authorization-store.js';
@@ -917,6 +795,153 @@ describe("Milestone 6.2 Phase 2: Genuine Multi-Process Concurrency Governance", 
         const cancelWorker = results.find((r) => r.workerId === 1);
         expect(cancelWorker?.stdout).toContain("RACE_RESULT:CANCEL_FAIL");
       }
+    } finally {
+      verifyStore.close();
+    }
+  }, 25000);
+
+  it("strictly prevents cumulative budget overruns when multiple OS processes race to consume authorizations with a shared budget cap", async () => {
+    const dbFile = databasePath("budget-race.sqlite");
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
+
+    const initialStore = new SQLiteAuthorizationStore(dbFile, new TestClock(1000));
+    const policyStore = initialStore.getPolicyStore();
+    const keyStore = initialStore.getKeyStore();
+
+    // Policy allows 100 per action, 250 cumulative per hour
+    const budgetedPolicy: DemoPolicy = {
+      ...basePolicy,
+      policyId: "multi-proc-budget-policy",
+      maxAmount: "100",
+      budget: {
+        window: "HOURLY",
+        maxCumulativeAmount: "250",
+      },
+    };
+    policyStore.registerPolicy(budgetedPolicy);
+
+    keyStore.registerKey({
+      keyId: "race-key-01",
+      publicKey,
+      status: "active",
+      validFromSeconds: 1000,
+      expiresAtSeconds: 9000,
+    });
+
+    const recipientPadded = "0000000000000000000000002222222222222222222222222222222222222222";
+    // 100 units
+    const amountPadded = "0000000000000000000000000000000000000000000000000000000000000064";
+    const req = {
+      chainId: "1",
+      sender: "0x3333333333333333333333333333333333333333",
+      target: "0x1111111111111111111111111111111111111111",
+      calldata: `0xa9059cbb${recipientPadded}${amountPadded}`,
+      value: "0",
+    };
+
+    // Pre-issue 4 authorizations of 100 units each (total 400 requested vs 250 budget cap)
+    const issuedArtifacts: any[] = [];
+    for (let i = 1; i <= 4; i++) {
+      const issue = issueSignedTransactionAuthorizationV3(
+        initialStore,
+        { keyId: "race-key-01", privateKey },
+        `auth-budget-race-${i}`,
+        budgetedPolicy.policyId,
+        req,
+      );
+      expect(issue.decision).toBe("ALLOW");
+      if (issue.decision !== "ALLOW") throw new Error("issuance failed");
+      issuedArtifacts.push(issue.artifact);
+    }
+    initialStore.close();
+
+    const makeBudgetWorker = (workerId: number) => `
+      import { SQLiteAuthorizationStore } from './src/authorization-store.js';
+      import { TestClock } from './src/clock.js';
+      import { consumeSignedTransactionAuthorizationV3 } from './src/authorization-lifecycle.js';
+      import { createTransactionEnvelope } from './src/transaction-envelope.js';
+
+      const watchdog = setTimeout(() => {
+        console.error('WORKER_WATCHDOG_TIMEOUT:' + ${workerId});
+        process.exit(2);
+      }, 15000);
+      watchdog.unref();
+
+      const store = new SQLiteAuthorizationStore(${JSON.stringify(dbFile)}, new TestClock(1050));
+      store.getDatabase().exec("PRAGMA busy_timeout = 6000;");
+
+      const artifact = ${JSON.stringify(issuedArtifacts[workerId - 1])};
+      const req = ${JSON.stringify(req)};
+      const envRes = createTransactionEnvelope(req);
+      if (!envRes.ok) {
+        store.close();
+        process.exit(1);
+      }
+
+      process.on('message', (msg) => {
+        if (msg === 'START') {
+          try {
+            const consumed = consumeSignedTransactionAuthorizationV3(
+              store,
+              artifact,
+              envRes.envelope,
+              req,
+            );
+            store.close();
+            if (consumed.decision === 'ALLOW') {
+              console.log('RACE_RESULT:ALLOW:' + ${workerId});
+            } else {
+              console.log('RACE_RESULT:DENY:' + ${workerId} + ':' + JSON.stringify(consumed.reasons));
+            }
+            process.exit(0);
+          } catch (err) {
+            console.error('WORKER_EXCEPTION:' + ${workerId} + ':' + (err instanceof Error ? err.stack : String(err)));
+            try { store.close(); } catch {}
+            process.exit(1);
+          }
+        }
+      });
+
+      if (process.send) {
+        process.send({ type: 'READY', workerId: ${workerId} });
+      } else {
+        process.exit(1);
+      }
+    `;
+
+    const results = await runRendezvousWorkers([
+      { workerId: 1, code: makeBudgetWorker(1) },
+      { workerId: 2, code: makeBudgetWorker(2) },
+      { workerId: 3, code: makeBudgetWorker(3) },
+      { workerId: 4, code: makeBudgetWorker(4) },
+    ]);
+
+    for (const r of results) {
+      if (r.exitCode !== 0) {
+        console.error("Worker error:", r.stderr, r.stdout);
+      }
+      expect(r.exitCode).toBe(0);
+    }
+
+    const allowResults = results.filter((r) => r.stdout.includes("RACE_RESULT:ALLOW:"));
+    const denyResults = results.filter((r) => r.stdout.includes("RACE_RESULT:DENY:"));
+
+    // Exactly 2 workers can be granted consumption (2 * 100 = 200 <= 250)
+    expect(allowResults).toHaveLength(2);
+    // Exactly 2 workers must be denied due to budget limit (300 > 250)
+    expect(denyResults).toHaveLength(2);
+
+    for (const d of denyResults) {
+      expect(d.stdout).toContain("Cumulative spending budget exceeded for hourly window");
+    }
+
+    // Verify accumulator in database: spentAmount must be exactly 200
+    const verifyStore = new SQLiteAuthorizationStore(dbFile, new TestClock(1050));
+    try {
+      const accum = verifyStore.getPolicyBudgetAccumulator(budgetedPolicy.policyId, "HOURLY", 0);
+      expect(accum).not.toBeNull();
+      expect(accum?.spentAmount).toBe("200");
     } finally {
       verifyStore.close();
     }

@@ -220,6 +220,36 @@ export const PRESETS = {
       nowSeconds: BASE_NOW,
     },
   },
+  budget_exceeded: {
+    name: "9. Budget Exceeded",
+    badge: "DENY",
+    description: "Transfer of 400 USDC within per-action limit (1,000), but cumulative hourly spending (700 spent + 400 proposed = 1,100) exceeds 1,000 hourly budget cap.",
+    policy: {
+      version: 1,
+      policyId: "usdc-budget-policy-v1",
+      allowedTarget: USDC_MAINNET,
+      allowedRecipient: ALLOWED_RECIPIENT,
+      allowedSelector: ERC20_TRANSFER_SELECTOR,
+      maxAmount: "1000000000",
+      validFrom: 1800000000,
+      expiresAt: 1800086400,
+      revoked: false,
+      budget: {
+        window: "HOURLY",
+        maxCumulativeAmount: "1000000000",
+      },
+    },
+    action: {
+      target: USDC_MAINNET,
+      recipient: ALLOWED_RECIPIENT,
+      amount: "400000000",
+      calldata: "",
+    },
+    context: {
+      nowSeconds: BASE_NOW,
+      currentWindowSpent: "700000000",
+    },
+  },
 };
 
 export function initDemo(container) {
@@ -238,11 +268,14 @@ export function initDemo(container) {
     validFrom: container.querySelector("#valid-from"),
     expiresAt: container.querySelector("#expires-at"),
     policyRevoked: container.querySelector("#policy-revoked"),
+    budgetWindow: container.querySelector("#budget-window"),
+    maxCumulativeAmount: container.querySelector("#max-cumulative-amount"),
 
     // Action inputs
     actionTarget: container.querySelector("#action-target"),
     actionRecipient: container.querySelector("#action-recipient"),
     actionAmount: container.querySelector("#action-amount"),
+    simulatedSpent: container.querySelector("#simulated-spent"),
     actionCalldata: container.querySelector("#action-calldata"),
     syncCalldataBtn: container.querySelector("#btn-sync-calldata"),
     evalTimestamp: container.querySelector("#eval-timestamp"),
@@ -291,10 +324,24 @@ export function initDemo(container) {
     els.expiresAt.value = p.policy.expiresAt;
     els.policyRevoked.checked = p.policy.revoked;
 
+    if (p.policy.budget) {
+      els.budgetWindow.value = p.policy.budget.window;
+      els.maxCumulativeAmount.value = p.policy.budget.maxCumulativeAmount;
+    } else {
+      els.budgetWindow.value = "NONE";
+      els.maxCumulativeAmount.value = "";
+    }
+
     els.actionTarget.value = p.action.target;
     els.actionRecipient.value = p.action.recipient;
     els.actionAmount.value = p.action.amount;
     els.evalTimestamp.value = p.context.nowSeconds;
+
+    if (p.context.currentWindowSpent !== undefined) {
+      els.simulatedSpent.value = p.context.currentWindowSpent;
+    } else {
+      els.simulatedSpent.value = "";
+    }
 
     if (p.action.calldata) {
       els.actionCalldata.value = p.action.calldata;
@@ -317,6 +364,7 @@ export function initDemo(container) {
   }
 
   function getFormData() {
+    const budgetWindow = els.budgetWindow.value;
     const policy = {
       version: 1,
       policyId: els.policyId.value.trim(),
@@ -329,6 +377,13 @@ export function initDemo(container) {
       revoked: els.policyRevoked.checked,
     };
 
+    if (budgetWindow === "HOURLY" || budgetWindow === "DAILY") {
+      policy.budget = {
+        window: budgetWindow,
+        maxCumulativeAmount: els.maxCumulativeAmount.value.trim(),
+      };
+    }
+
     const action = {
       target: els.actionTarget.value.trim(),
       calldata: els.actionCalldata.value.trim(),
@@ -338,6 +393,10 @@ export function initDemo(container) {
     const context = {
       nowSeconds: parseInt(els.evalTimestamp.value.trim(), 10) || 0,
     };
+
+    if (policy.budget) {
+      context.currentWindowSpent = els.simulatedSpent.value.trim() || "0";
+    }
 
     return { policy, action, context };
   }
@@ -389,6 +448,9 @@ export function initDemo(container) {
   }
 
   function updateCodeSnippet(policy, action) {
+    const budgetSnippet = policy.budget
+      ? `\n  budget: {\n    window: "${policy.budget.window}",\n    maxCumulativeAmount: "${policy.budget.maxCumulativeAmount}",\n  },`
+      : "";
     const code = `import { Web3UserEngine, type DemoPolicy, type TransactionRequest } from "web3user-permission-lab";
 
 // 1. Initialize Web3User Engine with SQLite durability
@@ -406,7 +468,7 @@ const policy: DemoPolicy = {
   maxAmount: "${policy.maxAmount}",
   validFrom: ${policy.validFrom},
   expiresAt: ${policy.expiresAt},
-  revoked: ${policy.revoked},
+  revoked: ${policy.revoked},${budgetSnippet}
 };
 engine.policies.register(policy);
 
@@ -446,9 +508,12 @@ if (issueResult.decision === "ALLOW") {
     els.validFrom,
     els.expiresAt,
     els.policyRevoked,
+    els.budgetWindow,
+    els.maxCumulativeAmount,
     els.actionTarget,
     els.actionRecipient,
     els.actionAmount,
+    els.simulatedSpent,
     els.actionCalldata,
     els.evalTimestamp,
   ].forEach((input) => {
