@@ -42,6 +42,7 @@ import {
 import { isFatalIOError } from "./sqlite-transaction.js";
 import type { TransactionAuthorization } from "./policy-transaction.js";
 import type { Clock, MonotonicClock } from "./clock.js";
+import type { MonotonicWitnessAdapter } from "./monotonic-witness.js";
 
 // ============================================================================
 // Error Hierarchy
@@ -208,6 +209,11 @@ export interface Web3UserEngineOptions {
    * Defaults to false (strict V3 only).
    */
   readonly allowLegacyArtifactVersions?: boolean;
+
+  /**
+   * Optional monotonic witness adapter for multi-node rollback resistance and witness receipts.
+   */
+  readonly witnessAdapter?: MonotonicWitnessAdapter;
 }
 
 /**
@@ -263,6 +269,21 @@ export interface ConsumeAuthorizationParams {
    * If omitted, the engine automatically calculates and verifies the envelope from the request.
    */
   readonly envelope?: unknown;
+
+  /**
+   * Optional witness adapter override for this specific consumption call.
+   */
+  readonly witnessAdapter?: MonotonicWitnessAdapter;
+
+  /**
+   * Optional idempotency key for witness reservation deduplication.
+   */
+  readonly idempotencyKey?: string;
+
+  /**
+   * Optional lease TTL in seconds for the witness reservation (default: 30s).
+   */
+  readonly leaseTtlSeconds?: number;
 }
 
 // ============================================================================
@@ -277,6 +298,7 @@ export interface ConsumeAuthorizationParams {
  */
 export class Web3UserEngine {
   private readonly store: SQLiteAuthorizationStore;
+  private readonly witnessAdapter?: MonotonicWitnessAdapter;
   private isClosed = false;
 
   public constructor(options: Web3UserEngineOptions) {
@@ -286,6 +308,8 @@ export class Web3UserEngine {
     if (typeof options.databasePath !== "string" || options.databasePath.trim().length === 0) {
       throw new ValidationError("databasePath must be a non-empty string.");
     }
+
+    this.witnessAdapter = options.witnessAdapter;
 
     try {
       this.store = new SQLiteAuthorizationStore(options.databasePath, {
@@ -389,11 +413,19 @@ export class Web3UserEngine {
         envelope = created.envelope;
       }
 
+      const witness = params.witnessAdapter ?? this.witnessAdapter;
       return consumeSignedTransactionAuthorizationV3(
         this.store,
         params.artifact,
         envelope,
         params.request,
+        witness
+          ? {
+              witnessAdapter: witness,
+              idempotencyKey: params.idempotencyKey,
+              leaseTtlSeconds: params.leaseTtlSeconds,
+            }
+          : undefined,
       );
     } catch (err) {
       this.handleError(err);

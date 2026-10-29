@@ -43,6 +43,10 @@ import {
   type BudgetWindowType,
   type Evaluation,
 } from "./policy.js";
+import {
+  type MonotonicWitnessAdapter,
+  type SignedWitnessReceipt,
+} from "./monotonic-witness.js";
 
 const consumedEnvelopes = new WeakSet<object>();
 const consumedAuthorizationIds = new Set<string>();
@@ -1011,6 +1015,35 @@ export function issueSignedTransactionAuthorizationV3(
   }
 }
 
+export interface ConsumeSignedAuthorizationV3Options {
+  readonly witnessAdapter?: MonotonicWitnessAdapter;
+  readonly idempotencyKey?: string;
+  readonly leaseTtlSeconds?: number;
+}
+
+function releaseWitnessTicket(
+  adapter: MonotonicWitnessAdapter | undefined,
+  authorizationId: string,
+  bindingDigest: string,
+  ticketId: string | undefined,
+  reason: string,
+): void {
+  if (!adapter || !ticketId) return;
+  try {
+    const res = adapter.releaseTicket({
+      ticketId,
+      authorizationId,
+      bindingDigest,
+      reason,
+    });
+    if (res instanceof Promise) {
+      res.catch(() => {});
+    }
+  } catch {
+    // Suppress release error to preserve original denial reason
+  }
+}
+
 /**
  * Revalidate and consume an Ed25519-signed authorization artifact v3 atomically
  * in SQLite.
@@ -1025,6 +1058,7 @@ export function consumeSignedTransactionAuthorizationV3(
   artifactInput: unknown,
   envelopeInput: unknown,
   candidateInput: unknown,
+  options?: ConsumeSignedAuthorizationV3Options,
 ): TransactionAuthorization {
   const store = storeInput instanceof SQLiteAuthorizationStore ? storeInput : storeInput.store;
   if (!store || !(store instanceof SQLiteAuthorizationStore)) {
@@ -1134,25 +1168,182 @@ export function consumeSignedTransactionAuthorizationV3(
   const initialNow = store.getClock().nowSeconds();
   void initialNow;
 
+  // 3a. Replay & Single-Use Fast-Path Check (outside exclusive write lock)
+  // Prevents reserving or looking up witness tickets for authorizations that are already consumed.
+  if (isObject(envelopeInput) && consumedEnvelopes.has(envelopeInput)) {
+    return deny("Transaction authorization has already been consumed.");
+  }
+
+  try {
+    const earlyAuthRow = db.prepare(
+      "SELECT state FROM consumed_authorization_ids WHERE authorization_id = ?"
+    ).get(artifact.authorizationId) as { state: string } | undefined;
+
+    if (earlyAuthRow && earlyAuthRow.state === "consumed") {
+      return deny("Bound transaction authorization is unknown, consumed, or mismatched.");
+    }
+  } catch {
+    // Non-fatal pre-check read error; proceed to strict in-lock enforcement
+  }
+
+  // 3b. Witness Pre-Reservation Step (outside exclusive write lock)
+  let witnessTicketId: string | undefined;
+  if (options?.witnessAdapter) {
+    let budgetWindows: Array<{
+      windowType: BudgetWindowType;
+      windowStart: number;
+      requestedAmount: string;
+      maxCumulativeAmount: string;
+    }> | undefined;
+
+    let candidateAmount: bigint | undefined;
+    let reqCalldata: string | undefined;
+    if (isObject(candidateInput) && "calldata" in candidateInput && typeof (candidateInput as any).calldata === "string") {
+      reqCalldata = (candidateInput as any).calldata;
+    } else if (isObject(envelopeInput) && "request" in envelopeInput && isObject((envelopeInput as any).request) && typeof (envelopeInput as any).request.calldata === "string") {
+      reqCalldata = (envelopeInput as any).request.calldata;
+    }
+    if (reqCalldata) {
+      const decoded = decodeTransfer(reqCalldata);
+      if (decoded) {
+        candidateAmount = decoded.amount;
+      }
+    }
+
+    try {
+      const prePolRow = db.prepare(
+        "SELECT current_revision, status, policy_json FROM policies WHERE policy_id = ?"
+      ).get(artifact.policyId) as { current_revision: number; status: string; policy_json: string } | undefined;
+      if (prePolRow && prePolRow.status === "active") {
+        const pol = JSON.parse(prePolRow.policy_json);
+        if (pol && pol.budget && candidateAmount !== undefined) {
+          const nowSec = store.getClock().nowSeconds();
+          const winStart = calculateBudgetWindowStart(nowSec, pol.budget.window);
+          budgetWindows = [
+            {
+              windowType: pol.budget.window,
+              windowStart: winStart,
+              requestedAmount: candidateAmount.toString(10),
+              maxCumulativeAmount: BigInt(pol.budget.maxCumulativeAmount).toString(10),
+            },
+          ];
+        }
+      }
+    } catch {
+      // Ignore pre-check read errors
+    }
+
+    const idempKey = options.idempotencyKey ?? `idemp-${artifact.authorizationId}-${artifact.bindingDigest.slice(-16)}`;
+    const reserveResult = options.witnessAdapter.reserveTicket({
+      authorizationId: artifact.authorizationId,
+      bindingDigest: artifact.bindingDigest,
+      policyId: artifact.policyId,
+      policyRevision: artifact.policyRevision,
+      budgetWindows,
+      idempotencyKey: idempKey,
+      leaseTtlSeconds: options.leaseTtlSeconds,
+    });
+
+    if (reserveResult instanceof Promise) {
+      throw new Error(
+        "Async witness adapters cannot be used with synchronous consumeSignedTransactionAuthorizationV3. Provide a synchronous witness adapter.",
+      );
+    }
+
+    if (reserveResult.decision !== "ALLOW") {
+      return {
+        decision: "DENY",
+        reasons: reserveResult.reasons ?? ["Witness reservation was denied."],
+      };
+    }
+
+    witnessTicketId = reserveResult.ticketId;
+  }
+
+  const canReleaseWitnessOnPreLockAbort = (): boolean => {
+    try {
+      const row = db.prepare(
+        "SELECT state FROM consumed_authorization_ids WHERE authorization_id = ?"
+      ).get(artifact.authorizationId) as { state: string } | undefined;
+      return !row || row.state !== "consumed";
+    } catch {
+      return false; // Fail-closed: do not release if state cannot be confirmed
+    }
+  };
+
   // 4. Acquire in-process lock and SQLite exclusive write lock
   const guard = store.getClockGuard();
   if (!guard.acquireLock()) {
+    if (canReleaseWitnessOnPreLockAbort()) {
+      releaseWitnessTicket(options?.witnessAdapter, artifact.authorizationId, artifact.bindingDigest, witnessTicketId, "IN_PROCESS_LOCK_CONTENTION");
+    }
     return deny("Concurrent transaction in progress within same process; operation serialized.");
   }
 
   try {
     if (!beginImmediateWithRetry(db)) {
+      if (canReleaseWitnessOnPreLockAbort()) {
+        releaseWitnessTicket(options?.witnessAdapter, artifact.authorizationId, artifact.bindingDigest, witnessTicketId, "DATABASE_BUSY_CONTENTION");
+      }
       guard.releaseLock();
       return deny("Database is busy; transaction contention retry limit exceeded.");
     }
   } catch (err) {
+    if (canReleaseWitnessOnPreLockAbort()) {
+      releaseWitnessTicket(options?.witnessAdapter, artifact.authorizationId, artifact.bindingDigest, witnessTicketId, "DATABASE_BEGIN_ERROR");
+    }
     guard.releaseLock();
     throw err;
   }
 
   let candidate: ClockCandidate;
+  let localCommitted = false;
+  let effectiveNowSeconds = 0;
+  let approvedRevalResult: (Evaluation & { decision: "ALLOW"; envelope: TransactionEnvelope }) | undefined;
 
   try {
+    const rollbackAndDeny = (reason: string | string[], isUnknown = false): TransactionAuthorization => {
+      // Monotonic Witness Safety (SEC-M11-03):
+      // A witness ticket may ONLY be released if this authorization is provably unconsumed in SQLite.
+      // If the authorization was committed locally or its state is uncertain, capacity must remain held.
+      let canRelease = !localCommitted && !store.isTainted();
+      if (canRelease) {
+        try {
+          const check = db.prepare(
+            "SELECT state FROM consumed_authorization_ids WHERE authorization_id = ?"
+          ).get(artifact.authorizationId) as { state: string } | undefined;
+          if (check && check.state === "consumed") {
+            canRelease = false;
+          }
+        } catch {
+          canRelease = false;
+        }
+      }
+
+      if (canRelease) {
+        releaseWitnessTicket(
+          options?.witnessAdapter,
+          artifact.authorizationId,
+          artifact.bindingDigest,
+          witnessTicketId,
+          Array.isArray(reason) ? reason.join("; ") : reason,
+        );
+      }
+      db.exec("ROLLBACK;");
+      if (isUnknown) {
+        return {
+          decision: "UNKNOWN",
+          reasons: Array.isArray(reason) ? reason : [reason],
+          ...(witnessTicketId ? { witnessTicketId } : {}),
+        };
+      }
+      return {
+        decision: "DENY",
+        reasons: Array.isArray(reason) ? reason : [reason],
+        ...(witnessTicketId ? { witnessTicketId } : {}),
+      };
+    };
+
     // 5. Validate candidate time against guard and persisted high-water mark inside write lock
     const clock = store.getClock();
     candidate = {
@@ -1165,20 +1356,18 @@ export function consumeSignedTransactionAuthorizationV3(
     ).get() as { high_water_seconds: number } | undefined;
 
     if (!clockRow) {
-      db.exec("ROLLBACK;");
-      return deny("System clock state is missing or corrupted.");
+      return rollbackAndDeny("System clock state is missing or corrupted.");
     }
 
     const highWaterSeconds = clockRow.high_water_seconds;
 
     const clockEval = guard.evaluateCandidate(candidate, highWaterSeconds);
     if (clockEval.decision !== "ALLOW") {
-      db.exec("ROLLBACK;");
-      return deny(clockEval.reason ?? "Clock evaluation failed.");
+      return rollbackAndDeny(clockEval.reason ?? "Clock evaluation failed.");
     }
 
     const currentNow = candidate.wallSeconds;
-    const effectiveNowSeconds = Math.max(currentNow, highWaterSeconds);
+    effectiveNowSeconds = Math.max(currentNow, highWaterSeconds);
 
     if (effectiveNowSeconds > highWaterSeconds) {
       db.prepare(`
@@ -1188,10 +1377,27 @@ export function consumeSignedTransactionAuthorizationV3(
       `).run(effectiveNowSeconds);
     }
 
-    // Check in-process duplicate inside write lock
+    // Check in-process duplicate and persisted replay state under write lock
     if (isObject(envelopeInput) && consumedEnvelopes.has(envelopeInput)) {
       db.exec("ROLLBACK;");
-      return deny("Transaction authorization has already been consumed.");
+      return {
+        decision: "DENY",
+        reasons: ["Transaction authorization has already been consumed."],
+        ...(witnessTicketId ? { witnessTicketId } : {}),
+      };
+    }
+
+    const currentAuthRow = db.prepare(
+      "SELECT state FROM consumed_authorization_ids WHERE authorization_id = ?"
+    ).get(artifact.authorizationId) as { state: string } | undefined;
+
+    if (currentAuthRow && currentAuthRow.state === "consumed") {
+      db.exec("ROLLBACK;");
+      return {
+        decision: "DENY",
+        reasons: ["Bound transaction authorization is unknown, consumed, or mismatched."],
+        ...(witnessTicketId ? { witnessTicketId } : {}),
+      };
     }
 
     // 6. TOCTOU Re-validation: Verify issuer key status under write lock
@@ -1207,47 +1413,39 @@ export function consumeSignedTransactionAuthorizationV3(
     } | undefined;
 
     if (!keyRow) {
-      db.exec("ROLLBACK;");
-      return deny("Issuer key is unknown.");
+      return rollbackAndDeny("Issuer key is unknown.");
     }
 
     if (keyRow.status === "revoked") {
-      db.exec("ROLLBACK;");
-      return deny("Issuer key has been revoked.");
+      return rollbackAndDeny("Issuer key has been revoked.");
     }
 
     if (keyRow.status !== "active" && keyRow.status !== "retired") {
-      db.exec("ROLLBACK;");
-      return deny("Issuer key status does not permit verification.");
+      return rollbackAndDeny("Issuer key status does not permit verification.");
     }
 
     // Post-retirement forgery rule:
     // A retired key may validate only artifacts whose signed issuance time is strictly before retirement time
     if (keyRow.status === "retired") {
       if (keyRow.retired_at_seconds !== null && artifact.issuedAtSeconds >= keyRow.retired_at_seconds) {
-        db.exec("ROLLBACK;");
-        return deny("Authorization was issued after issuer key was retired.");
+        return rollbackAndDeny("Authorization was issued after issuer key was retired.");
       }
     }
 
     // Key validity windows
     if (keyRow.valid_from_seconds !== null && artifact.issuedAtSeconds < keyRow.valid_from_seconds) {
-      db.exec("ROLLBACK;");
-      return deny("Issuer key was not yet valid at authorization issuance time.");
+      return rollbackAndDeny("Issuer key was not yet valid at authorization issuance time.");
     }
     if (keyRow.expires_at_seconds !== null && artifact.issuedAtSeconds >= keyRow.expires_at_seconds) {
-      db.exec("ROLLBACK;");
-      return deny("Issuer key had expired at authorization issuance time.");
+      return rollbackAndDeny("Issuer key had expired at authorization issuance time.");
     }
     if (keyRow.expires_at_seconds !== null && effectiveNowSeconds >= keyRow.expires_at_seconds) {
-      db.exec("ROLLBACK;");
-      return deny("Issuer key has expired.");
+      return rollbackAndDeny("Issuer key has expired.");
     }
 
     // Guard against key tampering in storage: verify public key PEM is unchanged
     if (keyRow.public_key_pem !== preKeyRow.public_key_pem) {
-      db.exec("ROLLBACK;");
-      return deny("Issuer key was modified concurrently.");
+      return rollbackAndDeny("Issuer key was modified concurrently.");
     }
 
     // 5. Load authoritative policy and reject stale revisions or revoked/retired policies
@@ -1260,61 +1458,48 @@ export function consumeSignedTransactionAuthorizationV3(
     } | undefined;
 
     if (!polRow) {
-      db.exec("ROLLBACK;");
-      return deny(`Authoritative policy '${artifact.policyId}' not found.`);
+      return rollbackAndDeny(`Authoritative policy '${artifact.policyId}' not found.`);
     }
 
     if (polRow.status === "revoked") {
-      db.exec("ROLLBACK;");
-      return deny("Policy has been revoked.");
+      return rollbackAndDeny("Policy has been revoked.");
     }
     if (polRow.status === "retired") {
-      db.exec("ROLLBACK;");
-      return deny("Policy has been retired.");
+      return rollbackAndDeny("Policy has been retired.");
     }
     if (polRow.status !== "active") {
-      db.exec("ROLLBACK;");
-      return deny("Policy is not active.");
+      return rollbackAndDeny("Policy is not active.");
     }
 
     if (polRow.current_revision !== artifact.policyRevision) {
-      db.exec("ROLLBACK;");
-      return deny(
+      return rollbackAndDeny(
         `Policy revision mismatch: artifact bound to revision ${artifact.policyRevision}, but current policy revision is ${polRow.current_revision}.`
       );
     }
 
     const authoritativePolicy = normalizeDemoPolicy(JSON.parse(polRow.policy_json));
     if (!authoritativePolicy) {
-      db.exec("ROLLBACK;");
-      return {
-        decision: "UNKNOWN",
-        reasons: ["Authoritative policy is malformed."],
-      };
+      return rollbackAndDeny("Authoritative policy is malformed.", true);
     }
 
     // 6. Enforce anti-time-travel check and signed authorization expiry/boundaries
     if (artifact.issuedAtSeconds > currentNow) {
-      db.exec("ROLLBACK;");
-      return deny("Authorization issuance timestamp is in the future relative to current clock.");
+      return rollbackAndDeny("Authorization issuance timestamp is in the future relative to current clock.");
     }
 
     // Exact expiry boundary: consumption at effectiveNowSeconds >= expiresAtSeconds is DENIED
     if (effectiveNowSeconds >= artifact.expiresAtSeconds) {
-      db.exec("ROLLBACK;");
-      return deny("Signed transaction authorization has expired.");
+      return rollbackAndDeny("Signed transaction authorization has expired.");
     }
 
     // Signed expiry must not exceed authoritative policy expiry boundary
     if (authoritativePolicy.expiresAt !== undefined && authoritativePolicy.expiresAt !== null && artifact.expiresAtSeconds > authoritativePolicy.expiresAt) {
-      db.exec("ROLLBACK;");
-      return deny("Authorization expiry exceeds authoritative policy expiry boundary.");
+      return rollbackAndDeny("Authorization expiry exceeds authoritative policy expiry boundary.");
     }
 
     // Signed expiry must not exceed applicable issuer key expiry boundary
     if (keyRow.expires_at_seconds !== null && artifact.expiresAtSeconds > keyRow.expires_at_seconds) {
-      db.exec("ROLLBACK;");
-      return deny("Authorization expiry exceeds issuer key expiry boundary.");
+      return rollbackAndDeny("Authorization expiry exceeds issuer key expiry boundary.");
     }
 
     // 7. Revalidate transaction envelope against authoritative policy
@@ -1326,9 +1511,13 @@ export function consumeSignedTransactionAuthorizationV3(
     );
 
     if (revalResult.decision !== "ALLOW") {
-      db.exec("ROLLBACK;");
-      return revalResult;
+      return rollbackAndDeny(
+        revalResult.reasons ?? ["Revalidation denied"],
+        revalResult.decision === "UNKNOWN",
+      );
     }
+
+    approvedRevalResult = revalResult;
 
     // 8. Verify binding digest
     const computedBindingDigest = createAuthorizationBindingDigest(
@@ -1337,8 +1526,7 @@ export function consumeSignedTransactionAuthorizationV3(
     );
 
     if (computedBindingDigest !== artifact.bindingDigest) {
-      db.exec("ROLLBACK;");
-      return deny("Transaction does not match the bound authorization artifact.");
+      return rollbackAndDeny("Transaction does not match the bound authorization artifact.");
     }
 
     // 8b. Milestone 8: Enforce Cumulative Spending Budget (if configured on authoritative policy)
@@ -1355,11 +1543,7 @@ export function consumeSignedTransactionAuthorizationV3(
       const currentSpent = accumRow ? BigInt(accumRow.spent_amount) : 0n;
       const decoded = decodeTransfer(revalResult.envelope.request.calldata);
       if (!decoded) {
-        db.exec("ROLLBACK;");
-        return {
-          decision: "UNKNOWN",
-          reasons: ["ERC-20 transfer calldata could not be decoded safely for budget check."],
-        };
+        return rollbackAndDeny("ERC-20 transfer calldata could not be decoded safely for budget check.", true);
       }
 
       const actionAmount = decoded.amount;
@@ -1367,14 +1551,10 @@ export function consumeSignedTransactionAuthorizationV3(
       const maxCumulative = BigInt(maxCumulativeAmount);
 
       if (newSpent > maxCumulative) {
-        db.exec("ROLLBACK;");
         const available = maxCumulative >= currentSpent ? (maxCumulative - currentSpent).toString(10) : "0";
-        return {
-          decision: "DENY",
-          reasons: [
-            `Cumulative spending budget exceeded for ${budgetWindow.toLowerCase()} window (requested: ${actionAmount.toString(10)}, available: ${available}).`,
-          ],
-        };
+        return rollbackAndDeny(
+          `Cumulative spending budget exceeded for ${budgetWindow.toLowerCase()} window (requested: ${actionAmount.toString(10)}, available: ${available}).`,
+        );
       }
 
       // Upsert accumulator row atomically inside the write lock
@@ -1405,25 +1585,37 @@ export function consumeSignedTransactionAuthorizationV3(
     );
 
     if (updateRes.changes !== 1) {
-      db.exec("ROLLBACK;");
-      return deny("Bound transaction authorization is unknown, consumed, or mismatched.");
+      const checkRow = db.prepare(
+        "SELECT state FROM consumed_authorization_ids WHERE authorization_id = ?"
+      ).get(artifact.authorizationId) as { state: string } | undefined;
+
+      if (checkRow && checkRow.state === "consumed") {
+        db.exec("ROLLBACK;");
+        return {
+          decision: "DENY",
+          reasons: ["Bound transaction authorization is unknown, consumed, or mismatched."],
+          ...(witnessTicketId ? { witnessTicketId } : {}),
+        };
+      }
+
+      return rollbackAndDeny("Bound transaction authorization is unknown, consumed, or mismatched.");
     }
 
     try {
       db.exec("COMMIT;");
+      localCommitted = true;
       guard.publishCandidate(candidate);
     } catch (commitErr) {
       const reason = `Commit failure with uncertain outcome: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`;
       store.markTainted(reason);
       throw commitErr;
     }
-
-    consumedEnvelopes.add(revalResult.envelope);
-    return revalResult;
   } catch (err) {
     let rollbackFatalErr: unknown;
     try {
-      db.exec("ROLLBACK;");
+      if (!localCommitted) {
+        db.exec("ROLLBACK;");
+      }
     } catch (rollbackErr) {
       if (isFatalIOError(rollbackErr)) {
         rollbackFatalErr = rollbackErr;
@@ -1436,10 +1628,88 @@ export function consumeSignedTransactionAuthorizationV3(
       const reason = `Fatal storage I/O error: ${err instanceof Error ? err.message : String(err)}`;
       store.markTainted(reason);
     }
+
+    if (!localCommitted && !store.isTainted() && !rollbackFatalErr) {
+      let canRelease = true;
+      try {
+        const check = db.prepare(
+          "SELECT state FROM consumed_authorization_ids WHERE authorization_id = ?"
+        ).get(artifact.authorizationId) as { state: string } | undefined;
+        if (check && check.state === "consumed") {
+          canRelease = false;
+        }
+      } catch {
+        canRelease = false;
+      }
+
+      if (canRelease) {
+        releaseWitnessTicket(
+          options?.witnessAdapter,
+          artifact.authorizationId,
+          artifact.bindingDigest,
+          witnessTicketId,
+          "LOCAL_SQLITE_TRANSACTION_FAILED",
+        );
+      }
+    }
     throw err;
   } finally {
     guard.releaseLock();
   }
+
+  // --- POST-COMMIT WITNESS FINALIZATION ---
+  // Reached strictly after successful SQLite COMMIT; (localCommitted is guaranteed true).
+  // The SQLite write lock is released.
+  if (!approvedRevalResult) {
+    return deny("Internal transaction state inconsistent.");
+  }
+
+  let witnessReceipt: SignedWitnessReceipt | undefined;
+  if (witnessTicketId && options?.witnessAdapter) {
+    try {
+      const commitRes = options.witnessAdapter.commitTicket({
+        ticketId: witnessTicketId,
+        authorizationId: artifact.authorizationId,
+        bindingDigest: artifact.bindingDigest,
+        localCommittedAtSeconds: effectiveNowSeconds,
+        idempotencyKey: options.idempotencyKey,
+      });
+
+      if (commitRes instanceof Promise) {
+        throw new Error("Async witness commit is not supported in synchronous consume.");
+      }
+
+      if (commitRes.decision === "ALLOW" && commitRes.receipt) {
+        witnessReceipt = commitRes.receipt;
+      } else {
+        const failureReason = commitRes.reasons?.join("; ") ?? "witness denied commit";
+        consumedEnvelopes.add(approvedRevalResult.envelope);
+        return {
+          decision: "UNKNOWN",
+          reasons: [
+            `Local SQLite transaction committed, but witness commitment failed (${failureReason}). Ticket '${witnessTicketId}' requires reconciliation.`,
+          ],
+          witnessTicketId,
+        };
+      }
+    } catch (witnessErr) {
+      consumedEnvelopes.add(approvedRevalResult.envelope);
+      return {
+        decision: "UNKNOWN",
+        reasons: [
+          `Local SQLite transaction committed, but witness commitment threw an error: ${witnessErr instanceof Error ? witnessErr.message : String(witnessErr)}. Ticket '${witnessTicketId}' requires reconciliation.`,
+        ],
+        witnessTicketId,
+      };
+    }
+  }
+
+  consumedEnvelopes.add(approvedRevalResult.envelope);
+  return {
+    ...approvedRevalResult,
+    ...(witnessReceipt ? { witnessReceipt } : {}),
+    ...(witnessTicketId ? { witnessTicketId } : {}),
+  };
 }
 
 /**

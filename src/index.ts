@@ -73,6 +73,7 @@ export {
   MAX_AUTHORIZATION_ID_LENGTH,
   type V3Signer,
   type IssueAuthorizationV3Options,
+  type ConsumeSignedAuthorizationV3Options,
   type SignedTransactionAuthorizationV3,
 } from "./authorization-lifecycle.js";
 
@@ -147,3 +148,27 @@ export {
   MAX_ABSOLUTE_DIVERGENCE_SECONDS,
   MAX_ANCHOR_LIFETIME_SECONDS,
 } from "./clock.js";
+
+// ============================================================================
+// Monotonic Witness Protocol & Local Deterministic Witness
+// ============================================================================
+export {
+  type WitnessTicketState,
+  type WitnessBudgetWindowAllocation,
+  type SignedWitnessReceipt,
+  type WitnessSyncStatus,
+  type WitnessReservationRequest,
+  type WitnessReservationResult,
+  type WitnessCommitRequest,
+  type WitnessCommitResult,
+  type WitnessReleaseRequest,
+  type WitnessReleaseResult,
+  type WitnessReconcileRequest,
+  type WitnessReconcileResult,
+  type UnfinalizedWitnessTicket,
+  type MonotonicWitnessAdapter,
+  type LocalDeterministicWitnessOptions,
+  LocalDeterministicWitness,
+  canonicalWitnessReceiptPayload,
+  verifyWitnessReceipt,
+} from "./monotonic-witness.js";

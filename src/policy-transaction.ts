@@ -5,14 +5,18 @@ import {
   type TransactionEnvelope,
   type TransactionRequest,
 } from "./transaction-envelope.js";
+import type { SignedWitnessReceipt } from "./monotonic-witness.js";
 
 export type TransactionAuthorization =
   | (Evaluation & {
       decision: "ALLOW";
       envelope: TransactionEnvelope;
+      witnessReceipt?: SignedWitnessReceipt;
+      witnessTicketId?: string;
     })
   | (Evaluation & {
       decision: "DENY" | "UNKNOWN";
+      witnessTicketId?: string;
     });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
