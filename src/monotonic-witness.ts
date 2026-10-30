@@ -346,7 +346,7 @@ export class LocalDeterministicWitness implements MonotonicWitnessAdapter {
     this.epochId = options?.epochId ?? "epoch-local-01";
     this.defaultLeaseTtlSeconds = options?.defaultLeaseTtlSeconds ?? 15;
     this.getTimeSeconds = options?.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
-    this.sequence = options?.initialSequence ?? 1n;
+    this.sequence = options?.initialSequence ?? 0n;
 
     if (options?.keyPair) {
       this.privateKey = options.keyPair.privateKey;

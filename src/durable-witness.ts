@@ -18,6 +18,14 @@
  *   3. Compromise of the local Ed25519 witness private key on host disk.
  *   4. Hostile root/administrator tampering with the SQLite database file.
  *
+ * - SEQUENCE ALLOCATION INVARIANTS (SEC-M13C-05):
+ *   1. Sequence numbers within an epoch are strictly increasing (monotonicity guarantee).
+ *   2. No sequence number is ever reused within an epoch; duplicate assignments are rejected fail-closed.
+ *   3. Sequence regression (witness sequence < local sequence) within an epoch is strictly prohibited.
+ *   4. Gapless sequence numbers are NOT required: non-contiguous sequences (gaps) from expired or released
+ *      reservations are normal and do not cause security failures.
+ *   5. Epoch transitions are explicitly authenticated via configured transition rules.
+ *
  * This implementation NEVER silently falls back to an in-memory mock if the SQLite database is unavailable.
  */
 
@@ -498,6 +506,10 @@ export class SQLiteDurableWitness implements MonotonicWitnessAdapter {
   // ============================================================================
   // MonotonicWitnessAdapter Interface Implementation
   // ============================================================================
+
+  public isOpen(): boolean {
+    return !this.isClosed;
+  }
 
   public getWitnessId(): string {
     return this.witnessId;

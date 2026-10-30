@@ -19,6 +19,8 @@ export {
   type ReconcileAllOptions,
   type ReconcileAllSummary,
   type ReconcileAllResult,
+  type EngineLifecycleState,
+  type EpochTransitionRule,
   // Typed Error Contract
   Web3UserError,
   EngineClosedError,
@@ -26,6 +28,11 @@ export {
   ContentionError,
   ClockGuardError,
   StoreTaintedError,
+  WitnessUnavailableError,
+  EpochDivergenceError,
+  SequenceRegressionError,
+  EngineInRecoveryModeError,
+  EngineNotReadyError,
   wrapEngineError,
 } from "./engine.js";
 
@@ -47,6 +54,8 @@ export {
   type ListUnreconciledWitnessRecordsOptions,
   type UnreconciledWitnessRecord,
   type PersistWitnessReceiptParams,
+  type GetLatestWitnessReceiptMetadataOptions,
+  type LatestWitnessReceiptMetadata,
 } from "./authorization-store.js";
 
 export type UnreconciledAuthorization = import("./authorization-store.js").UnreconciledWitnessRecord;

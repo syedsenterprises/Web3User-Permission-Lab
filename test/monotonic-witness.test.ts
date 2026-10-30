@@ -1567,8 +1567,7 @@ describe("Milestone 11 Phase 3A: Monotonic Witness Protocol & LocalDeterministic
       get publicKeyPem() {
         return baseWitness.publicKeyPem;
       },
-      async getSyncStatus(epoch, seq) {
-        await sleep(delayMs);
+      getSyncStatus(epoch, seq) {
         return baseWitness.getSyncStatus(epoch, seq);
       },
       async reserveTicket(req) {

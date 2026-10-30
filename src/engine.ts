@@ -53,6 +53,7 @@ import {
   type MonotonicWitnessAdapter,
   type SignedWitnessReceipt,
   type WitnessReconcileResult,
+  type WitnessSyncStatus,
   canonicalWitnessReceiptPayload,
   verifyWitnessReceipt,
 } from "./monotonic-witness.js";
@@ -122,6 +123,59 @@ export class StoreTaintedError extends Web3UserError {
 }
 
 /**
+ * Thrown when the configured monotonic witness is unavailable, unreachable, or unhealthy.
+ */
+export class WitnessUnavailableError extends Web3UserError {
+  constructor(message = "Configured monotonic witness is unavailable or unhealthy.", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WitnessUnavailableError";
+  }
+}
+
+/**
+ * Thrown when the witness epoch diverges from local historical receipts without an authenticated transition rule.
+ */
+export class EpochDivergenceError extends Web3UserError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "EpochDivergenceError";
+  }
+}
+
+/**
+ * Thrown when the witness reports a sequence number lower than local committed sequence (witness rewind/rollback).
+ */
+export class SequenceRegressionError extends Web3UserError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SequenceRegressionError";
+  }
+}
+
+/**
+ * Thrown when authorization issuance or consumption is attempted while the engine is in RECOVERY_RECONCILE_ONLY mode.
+ */
+export class EngineInRecoveryModeError extends Web3UserError {
+  constructor(
+    message = "Web3UserEngine is in RECOVERY_RECONCILE_ONLY mode: authorizations are blocked until reconciliation completes.",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "EngineInRecoveryModeError";
+  }
+}
+
+/**
+ * Thrown when operations requiring a READY engine state are attempted in a non-ready state.
+ */
+export class EngineNotReadyError extends Web3UserError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "EngineNotReadyError";
+  }
+}
+
+/**
  * Normalize an unknown error into a typed Web3UserError subclass while preserving the message and cause.
  */
 export function wrapEngineError(err: unknown): Web3UserError {
@@ -174,6 +228,25 @@ export function wrapEngineError(err: unknown): Web3UserError {
 // ============================================================================
 // SDK Configuration & Parameter Interfaces
 // ============================================================================
+
+/**
+ * State automaton of the Web3User Authorization Engine.
+ */
+export type EngineLifecycleState =
+  | "INITIALIZING"
+  | "READY"
+  | "RECOVERY_RECONCILE_ONLY"
+  | "UNAVAILABLE"
+  | "CLOSED";
+
+/**
+ * Explicit rule allowing legitimate epoch rollover without throwing EpochDivergenceError.
+ */
+export interface EpochTransitionRule {
+  readonly fromEpochId: string;
+  readonly toEpochId: string;
+  readonly reason?: string;
+}
 
 /**
  * Configuration options for opening a Web3User Authorization Engine backed by SQLite.
@@ -233,6 +306,30 @@ export interface Web3UserEngineOptions {
    * If omitted, falls back to witnessAdapter.publicKeyPem if available.
    */
   readonly witnessPublicKey?: string | KeyObject;
+
+  /**
+   * Explicitly allowed epoch transitions.
+   * If the witness epoch diverges from local recorded receipts, but matches an allowed transition rule,
+   * the engine will accept the new epoch instead of throwing EpochDivergenceError.
+   */
+  readonly allowedEpochTransitions?: ReadonlyArray<EpochTransitionRule>;
+
+  /**
+   * When true, opening the engine requires a configured, healthy durable witness adapter.
+   * If omitted or false, engine operates with local-only replay prevention when no witness is provided.
+   */
+  readonly requireDurableWitness?: boolean;
+
+  /**
+   * When true, engine.close() will automatically close the configured witness adapter (if supported).
+   */
+  readonly closeWitnessOnShutdown?: boolean;
+
+  /**
+   * Internal option to defer initial sync for openAsync.
+   * @internal
+   */
+  readonly _skipInitialSync?: boolean;
 }
 
 /**
@@ -425,7 +522,12 @@ export class Web3UserEngine {
   private readonly store: SQLiteAuthorizationStore;
   private readonly witnessAdapter?: MonotonicWitnessAdapter;
   private readonly witnessPublicKey?: KeyObject;
+  private readonly allowedEpochTransitions: ReadonlyArray<EpochTransitionRule>;
+  private readonly requireDurableWitness: boolean;
+  private readonly closeWitnessOnShutdown: boolean;
+  private lifecycleState: EngineLifecycleState = "INITIALIZING";
   private isClosed = false;
+  private initPromise?: Promise<void>;
 
   public constructor(options: Web3UserEngineOptions) {
     if (!options || typeof options !== "object") {
@@ -458,6 +560,11 @@ export class Web3UserEngine {
 
     this.witnessAdapter = options.witnessAdapter;
     this.witnessPublicKey = trustedWitnessKey;
+    this.allowedEpochTransitions = Object.freeze(
+      (options.allowedEpochTransitions ?? []).map((r) => Object.freeze({ ...r })),
+    );
+    this.requireDurableWitness = options.requireDurableWitness ?? false;
+    this.closeWitnessOnShutdown = options.closeWitnessOnShutdown ?? false;
 
     try {
       this.store = new SQLiteAuthorizationStore(options.databasePath, {
@@ -469,18 +576,423 @@ export class Web3UserEngine {
         onFatalTaint: options.onFatalTaint,
         allowLegacyArtifactVersions: options.allowLegacyArtifactVersions ?? false,
         witnessPublicKey: this.witnessPublicKey,
+        allowedEpochTransitions: this.allowedEpochTransitions,
       });
     } catch (err) {
+      this.lifecycleState = "UNAVAILABLE";
       throw wrapEngineError(err);
+    }
+
+    if (!options._skipInitialSync) {
+      try {
+        this.performInitialSync();
+      } catch (syncErr) {
+        try {
+          this.store.close();
+        } catch {}
+        this.isClosed = true;
+        this.lifecycleState = "UNAVAILABLE";
+        throw syncErr;
+      }
     }
   }
 
   /**
    * Open a Web3User Authorization Engine backed by SQLite.
-   * Runs schema initialization, WAL verification, and clock high-water synchronization.
+   * Runs schema initialization, WAL verification, clock high-water synchronization,
+   * and fail-closed witness startup synchronization.
    */
   public static open(options: Web3UserEngineOptions): Web3UserEngine {
     return new Web3UserEngine(options);
+  }
+
+  /**
+   * Open a Web3User Authorization Engine asynchronously.
+   * Required when using asynchronous witness adapters (e.g. remote HTTP witness).
+   */
+  public static async openAsync(options: Web3UserEngineOptions): Promise<Web3UserEngine> {
+    const engine = new Web3UserEngine(options);
+    if (engine.initPromise) {
+      try {
+        await engine.initPromise;
+      } catch (syncErr) {
+        try {
+          engine.store.close();
+        } catch {}
+        engine.isClosed = true;
+        engine.lifecycleState = "UNAVAILABLE";
+        throw syncErr;
+      }
+    }
+    return engine;
+  }
+
+  /**
+   * Returns current lifecycle state of the engine.
+   */
+  public getState(): EngineLifecycleState {
+    return this.lifecycleState;
+  }
+
+  /**
+   * Returns true if the engine is ready for normal issuance and consumption.
+   */
+  public isReady(): boolean {
+    return this.lifecycleState === "READY";
+  }
+
+  /**
+   * Returns true if the engine is restricted to recovery and reconciliation operations.
+   */
+  public isRecoveryOnly(): boolean {
+    return this.lifecycleState === "RECOVERY_RECONCILE_ONLY";
+  }
+
+  /**
+   * Verifies that all reconciliation conditions are satisfied and unlocks the engine to READY.
+   * Returns true if the engine is (or has transitioned to) READY, false otherwise.
+   */
+  public async verifyAndUnlockRecovery(): Promise<boolean> {
+    if (this.isClosed) {
+      return false;
+    }
+    if (this.lifecycleState !== "RECOVERY_RECONCILE_ONLY") {
+      return this.lifecycleState === "READY";
+    }
+
+    // 1. Verify no unreconciled records remain locally
+    const unreconciled = this.store.listUnreconciledWitnessRecords({ limit: 1 });
+    if (unreconciled.length > 0) {
+      return false;
+    }
+
+    // 2. Query witness adapter status if present
+    if (this.witnessAdapter) {
+      let syncStatus: WitnessSyncStatus;
+      try {
+        const syncResult = this.witnessAdapter.getSyncStatus();
+        syncStatus =
+          syncResult && typeof (syncResult as any).then === "function"
+            ? await (syncResult as Promise<WitnessSyncStatus>)
+            : (syncResult as WitnessSyncStatus);
+      } catch {
+        return false;
+      }
+
+      if (this.isClosed) {
+        return false;
+      }
+
+      if (!syncStatus || !syncStatus.healthy) {
+        return false;
+      }
+
+      let localMeta;
+      try {
+        localMeta = this.store.getLatestWitnessReceiptMetadata({
+          allowedEpochTransitions: this.allowedEpochTransitions,
+        });
+      } catch {
+        return false;
+      }
+
+      // Epoch check
+      const epochChanged =
+        localMeta.latestEpochId !== null && localMeta.latestEpochId !== syncStatus.epochId;
+      if (epochChanged) {
+        const isAllowed = this.allowedEpochTransitions.some(
+          (rule) =>
+            rule.fromEpochId === localMeta.latestEpochId &&
+            rule.toEpochId === syncStatus.epochId,
+        );
+        if (!isAllowed) {
+          return false;
+        }
+      }
+
+      // Sequence check (scoped to active epoch)
+      let witnessSeq: bigint;
+      try {
+        witnessSeq = BigInt(syncStatus.sequenceNumber);
+      } catch {
+        return false;
+      }
+
+      const localSeq =
+        localMeta.maxSequenceNumber !== null ? BigInt(localMeta.maxSequenceNumber) : 0n;
+
+      if (witnessSeq !== localSeq) {
+        return false;
+      }
+    }
+
+    if (this.isClosed) {
+      return false;
+    }
+
+    this.lifecycleState = "READY";
+    return true;
+  }
+
+  private performInitialSync(): void {
+    if (this.requireDurableWitness && !this.witnessAdapter) {
+      this.lifecycleState = "UNAVAILABLE";
+      throw new WitnessUnavailableError(
+        "requireDurableWitness is true, but no witnessAdapter was configured.",
+      );
+    }
+
+    if (!this.witnessAdapter) {
+      this.lifecycleState = "READY";
+      return;
+    }
+
+    let localMeta;
+    try {
+      localMeta = this.store.getLatestWitnessReceiptMetadata({
+        allowedEpochTransitions: this.allowedEpochTransitions,
+      });
+    } catch (err) {
+      this.lifecycleState = "UNAVAILABLE";
+      if (err instanceof Web3UserError) {
+        throw err;
+      }
+      throw new EpochDivergenceError(
+        `Failed to resolve witness receipt metadata: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+
+    const localUnreconciled = this.store.listUnreconciledWitnessRecords({ limit: 1 });
+
+    let syncStatus: WitnessSyncStatus;
+    try {
+      const syncResult = this.witnessAdapter.getSyncStatus(
+        localMeta.latestEpochId ?? undefined,
+        localMeta.maxSequenceNumber ?? undefined,
+      );
+      if (syncResult && typeof (syncResult as any).then === "function") {
+        this.initPromise = (syncResult as Promise<WitnessSyncStatus>)
+          .then((status) => {
+            if (this.isClosed) {
+              return;
+            }
+            this.applySyncStatus(status, localMeta, localUnreconciled.length > 0);
+          })
+          .catch((err) => {
+            if (this.isClosed) {
+              return;
+            }
+            this.lifecycleState = "UNAVAILABLE";
+            if (err instanceof Web3UserError) {
+              throw err;
+            }
+            throw new WitnessUnavailableError(
+              `Failed to retrieve witness sync status: ${err instanceof Error ? err.message : String(err)}`,
+              { cause: err },
+            );
+          });
+        return;
+      }
+      syncStatus = syncResult as WitnessSyncStatus;
+    } catch (err) {
+      this.lifecycleState = "UNAVAILABLE";
+      if (err instanceof Web3UserError) {
+        throw err;
+      }
+      throw new WitnessUnavailableError(
+        `Failed to retrieve witness sync status: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+
+    this.applySyncStatus(syncStatus, localMeta, localUnreconciled.length > 0);
+  }
+
+  private async performInitialSyncAsync(): Promise<void> {
+    if (this.isClosed) {
+      return;
+    }
+
+    if (this.requireDurableWitness && !this.witnessAdapter) {
+      this.lifecycleState = "UNAVAILABLE";
+      throw new WitnessUnavailableError(
+        "requireDurableWitness is true, but no witnessAdapter was configured.",
+      );
+    }
+
+    if (!this.witnessAdapter) {
+      if (this.isClosed) return;
+      this.lifecycleState = "READY";
+      return;
+    }
+
+    let localMeta;
+    try {
+      localMeta = this.store.getLatestWitnessReceiptMetadata({
+        allowedEpochTransitions: this.allowedEpochTransitions,
+      });
+    } catch (err) {
+      if (this.isClosed) return;
+      this.lifecycleState = "UNAVAILABLE";
+      if (err instanceof Web3UserError) {
+        throw err;
+      }
+      throw new EpochDivergenceError(
+        `Failed to resolve witness receipt metadata: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+
+    const localUnreconciled = this.store.listUnreconciledWitnessRecords({ limit: 1 });
+
+    let syncStatus: WitnessSyncStatus;
+    try {
+      syncStatus = await this.witnessAdapter.getSyncStatus(
+        localMeta.latestEpochId ?? undefined,
+        localMeta.maxSequenceNumber ?? undefined,
+      );
+    } catch (err) {
+      if (this.isClosed) {
+        return;
+      }
+      this.lifecycleState = "UNAVAILABLE";
+      if (err instanceof Web3UserError) {
+        throw err;
+      }
+      throw new WitnessUnavailableError(
+        `Failed to retrieve witness sync status: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+
+    if (this.isClosed) {
+      return;
+    }
+
+    this.applySyncStatus(syncStatus, localMeta, localUnreconciled.length > 0);
+  }
+
+  private applySyncStatus(
+    syncStatus: WitnessSyncStatus,
+    localMeta: {
+      readonly maxSequenceNumber: string | null;
+      readonly latestEpochId: string | null;
+      readonly witnessId: string | null;
+    },
+    hasUnreconciled: boolean,
+  ): void {
+    if (this.isClosed) {
+      this.lifecycleState = "CLOSED";
+      return;
+    }
+
+    if (!syncStatus || !syncStatus.healthy) {
+      this.lifecycleState = "UNAVAILABLE";
+      throw new WitnessUnavailableError(
+        syncStatus?.reason ?? "Monotonic witness reported unhealthy status.",
+      );
+    }
+
+    // 1. Epoch validation
+    const epochChanged =
+      localMeta.latestEpochId !== null && localMeta.latestEpochId !== syncStatus.epochId;
+    if (epochChanged) {
+      const isAllowed = this.allowedEpochTransitions.some(
+        (rule) =>
+          rule.fromEpochId === localMeta.latestEpochId &&
+          rule.toEpochId === syncStatus.epochId,
+      );
+      if (!isAllowed) {
+        this.lifecycleState = "UNAVAILABLE";
+        throw new EpochDivergenceError(
+          `Witness epoch '${syncStatus.epochId}' does not match local recorded epoch '${localMeta.latestEpochId}', and no allowed transition rule matched.`,
+        );
+      }
+    }
+
+    // Parse witness sequence
+    let witnessSeq: bigint;
+    try {
+      witnessSeq = BigInt(syncStatus.sequenceNumber);
+    } catch (e) {
+      this.lifecycleState = "UNAVAILABLE";
+      throw new ValidationError("Malformed sequence number in sync verification.", { cause: e });
+    }
+
+    // 2. Sequence comparison and local data presence check (SEC-M13C-02)
+    if (localMeta.maxSequenceNumber === null) {
+      // Local store has NO committed witness receipts.
+      if (witnessSeq > 0n) {
+        // Authoritative witness has a nonzero committed sequence, but local store has no committed records.
+        // Never enter READY. Enter RECOVERY_RECONCILE_ONLY.
+        this.lifecycleState = "RECOVERY_RECONCILE_ONLY";
+        return;
+      }
+      // If witnessSeq === 0n: witness has not committed any sequences either.
+      if (hasUnreconciled) {
+        this.lifecycleState = "RECOVERY_RECONCILE_ONLY";
+        return;
+      }
+      this.lifecycleState = "READY";
+      return;
+    }
+
+    // localMeta.maxSequenceNumber !== null
+    let localSeq: bigint;
+    try {
+      localSeq = BigInt(localMeta.maxSequenceNumber);
+    } catch (e) {
+      this.lifecycleState = "UNAVAILABLE";
+      throw new ValidationError("Malformed local sequence number in sync verification.", { cause: e });
+    }
+
+    if (!epochChanged) {
+      if (witnessSeq < localSeq) {
+        this.lifecycleState = "UNAVAILABLE";
+        throw new SequenceRegressionError(
+          `Witness sequence regression detected: witness sequence (${syncStatus.sequenceNumber}) is less than local recorded sequence (${localMeta.maxSequenceNumber}).`,
+        );
+      }
+
+      if (witnessSeq > localSeq) {
+        this.lifecycleState = "RECOVERY_RECONCILE_ONLY";
+        return;
+      }
+    } else {
+      // Epoch changed with allowed transition rule.
+      // In the new epoch, witness sequence may be greater than 0 while local store has not recorded any receipts in the new epoch yet.
+      if (witnessSeq > 0n) {
+        this.lifecycleState = "RECOVERY_RECONCILE_ONLY";
+        return;
+      }
+    }
+
+    // 3. Check for unreconciled local records
+    if (hasUnreconciled) {
+      this.lifecycleState = "RECOVERY_RECONCILE_ONLY";
+      return;
+    }
+
+    // All checks pass: state is READY
+    this.lifecycleState = "READY";
+  }
+
+  private assertReady(): void {
+    this.assertOpen();
+    this.assertNotTainted();
+    if (this.lifecycleState !== "READY") {
+      if (this.lifecycleState === "RECOVERY_RECONCILE_ONLY") {
+        throw new EngineInRecoveryModeError();
+      }
+      if (this.lifecycleState === "UNAVAILABLE") {
+        throw new WitnessUnavailableError("Engine is unavailable due to witness failure or desynchronization.");
+      }
+      if (this.lifecycleState === "INITIALIZING") {
+        throw new WitnessUnavailableError("Engine is still initializing; witness synchronization is pending.");
+      }
+      throw new EngineClosedError(`Engine is not ready (state: ${this.lifecycleState}).`);
+    }
   }
 
   // ==========================================================================
@@ -492,8 +1004,7 @@ export class Web3UserEngine {
    * Atomically transitions authorization record state to 'issued' in SQLite.
    */
   public issue(params: IssueAuthorizationParams): SignedTransactionAuthorizationV3 {
-    this.assertOpen();
-    this.assertNotTainted();
+    this.assertReady();
     try {
       if (!params || typeof params !== "object") {
         throw new ValidationError("Issue parameters must be an object.");
@@ -535,8 +1046,7 @@ export class Web3UserEngine {
    * Enforces single-use consumption and guarantees replay prevention.
    */
   public consume(params: ConsumeAuthorizationParams): TransactionAuthorization {
-    this.assertOpen();
-    this.assertNotTainted();
+    this.assertReady();
     try {
       if (!params || typeof params !== "object") {
         throw new ValidationError("Consume parameters must be an object.");
@@ -613,8 +1123,12 @@ export class Web3UserEngine {
    * and guarantees replay prevention without holding locks during remote calls.
    */
   public async consumeAsync(params: ConsumeAuthorizationParams): Promise<TransactionAuthorization> {
-    this.assertOpen();
-    this.assertNotTainted();
+    if (this.initPromise) {
+      try {
+        await this.initPromise;
+      } catch {}
+    }
+    this.assertReady();
     try {
       if (!params || typeof params !== "object") {
         throw new ValidationError("Consume parameters must be an object.");
@@ -690,8 +1204,7 @@ export class Web3UserEngine {
    * Returns true if cancelled, false if unknown, already consumed, or already cancelled.
    */
   public cancel(authorizationId: string): boolean {
-    this.assertOpen();
-    this.assertNotTainted();
+    this.assertReady();
     try {
       if (typeof authorizationId !== "string" || authorizationId.trim().length === 0) {
         throw new ValidationError("Authorization ID must be a non-empty string.");
@@ -794,6 +1307,22 @@ export class Web3UserEngine {
    * 9. Is safe and idempotent across retries and concurrent callers.
    */
   public async reconcileAuthorization(
+    authorizationId: string,
+    options?: ReconcileAuthorizationOptions,
+  ): Promise<ReconcileAuthorizationResult> {
+    if (this.initPromise) {
+      try {
+        await this.initPromise;
+      } catch {}
+    }
+    const result = await this.executeReconcileAuthorization(authorizationId, options);
+    if (!this.isClosed && this.lifecycleState === "RECOVERY_RECONCILE_ONLY") {
+      await this.verifyAndUnlockRecovery();
+    }
+    return result;
+  }
+
+  private async executeReconcileAuthorization(
     authorizationId: string,
     options?: ReconcileAuthorizationOptions,
   ): Promise<ReconcileAuthorizationResult> {
@@ -1170,6 +1699,11 @@ export class Web3UserEngine {
    * 8. Isolates failures so that an individual worker/authorization failure does not abort or corrupt others.
    */
   public async reconcileAll(options?: ReconcileAllOptions): Promise<ReconcileAllResult> {
+    if (this.initPromise) {
+      try {
+        await this.initPromise;
+      } catch {}
+    }
     this.assertOpen();
     this.assertNotTainted();
     try {
@@ -1423,6 +1957,10 @@ export class Web3UserEngine {
         unavailableCount,
         errorCount,
       });
+
+      if (this.lifecycleState === "RECOVERY_RECONCILE_ONLY") {
+        await this.verifyAndUnlockRecovery();
+      }
 
       return Object.freeze({
         summary,
@@ -1725,9 +2263,17 @@ export class Web3UserEngine {
   public close(): void {
     if (!this.isClosed) {
       this.isClosed = true;
+      this.lifecycleState = "CLOSED";
       try {
         this.store.close();
       } catch {}
+      if (this.closeWitnessOnShutdown && this.witnessAdapter) {
+        try {
+          if ("close" in this.witnessAdapter && typeof (this.witnessAdapter as any).close === "function") {
+            (this.witnessAdapter as any).close();
+          }
+        } catch {}
+      }
     }
   }
 
@@ -1747,7 +2293,7 @@ export class Web3UserEngine {
   }
 
   private assertOpen(): void {
-    if (this.isClosed) {
+    if (this.isClosed || this.lifecycleState === "CLOSED") {
       throw new EngineClosedError();
     }
   }

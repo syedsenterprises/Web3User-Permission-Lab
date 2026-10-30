@@ -51,6 +51,34 @@ export interface SQLiteAuthorizationStoreOptions {
   readonly onFatalTaint?: (reason: string) => void;
   readonly busyTimeoutMs?: number;
   readonly witnessPublicKey?: string | KeyObject;
+  /**
+   * Explicitly allowed epoch transitions.
+   * Used to determine latest epoch ordering and detect unauthorized epoch divergence.
+   */
+  readonly allowedEpochTransitions?: ReadonlyArray<EpochTransitionRule>;
+}
+
+/**
+ * Explicit rule allowing legitimate epoch rollover without failing closed.
+ */
+export interface EpochTransitionRule {
+  readonly fromEpochId: string;
+  readonly toEpochId: string;
+  readonly reason?: string;
+}
+
+export interface GetLatestWitnessReceiptMetadataOptions {
+  /**
+   * Explicitly allowed epoch transitions.
+   * If provided, overrides store-level configured epoch transitions for this query.
+   */
+  readonly allowedEpochTransitions?: ReadonlyArray<EpochTransitionRule>;
+}
+
+export interface LatestWitnessReceiptMetadata {
+  readonly maxSequenceNumber: string | null;
+  readonly latestEpochId: string | null;
+  readonly witnessId: string | null;
 }
 
 /**
@@ -160,6 +188,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
   private taintedReason: string | undefined;
   private readonly onFatalTaint?: (reason: string) => void;
   private readonly witnessPublicKey?: KeyObject;
+  private readonly allowedEpochTransitions: ReadonlyArray<EpochTransitionRule>;
 
   constructor(
     databasePath: string,
@@ -175,6 +204,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     let resolvedFatalTaint: ((reason: string) => void) | undefined;
     let resolvedBusyTimeout: number | undefined;
     let resolvedWitnessPublicKey: string | KeyObject | undefined;
+    let resolvedEpochTransitions: ReadonlyArray<EpochTransitionRule> = [];
 
     if (options && typeof options === "object") {
       resolvedClock =
@@ -189,6 +219,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
       resolvedFatalTaint = options.onFatalTaint;
       resolvedBusyTimeout = options.busyTimeoutMs;
       resolvedWitnessPublicKey = options.witnessPublicKey;
+      resolvedEpochTransitions = options.allowedEpochTransitions ?? [];
     } else if (clockOrOptions && "nowSeconds" in clockOrOptions) {
       resolvedClock = clockOrOptions;
       resolvedLegacy = false;
@@ -202,11 +233,15 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
       resolvedFatalTaint = clockOrOptions.onFatalTaint;
       resolvedBusyTimeout = clockOrOptions.busyTimeoutMs;
       resolvedWitnessPublicKey = clockOrOptions.witnessPublicKey;
+      resolvedEpochTransitions = clockOrOptions.allowedEpochTransitions ?? [];
     }
 
     this.clock = resolvedClock;
     this.allowLegacyArtifactVersions = resolvedLegacy;
     this.onFatalTaint = resolvedFatalTaint;
+    this.allowedEpochTransitions = Object.freeze(
+      resolvedEpochTransitions.map((r) => Object.freeze({ ...r })),
+    );
 
     if (resolvedWitnessPublicKey) {
       const parsed = parseEd25519PublicKey(resolvedWitnessPublicKey);
@@ -2007,6 +2042,246 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
         ),
         committedAtSeconds: receipt.committedAtSeconds,
         signature: receipt.signature,
+      });
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
+  }
+
+  /**
+   * Retrieves summary metadata for the highest committed witness receipt in local storage.
+   *
+   * SEC-M13C-01 & SEC-M13C-05 Invariant Enforcement:
+   * 1. The latest epoch is determined strictly using authenticated epoch transition rules.
+   * 2. Sequence numbers are strictly scoped to the active epoch; a newer epoch cannot be shadowed
+   *    by a higher historical sequence number from an earlier epoch.
+   * 3. Duplicate sequence assignments within an epoch are rejected fail-closed.
+   * 4. Sequence allocation requires strictly increasing values, but gaps are permitted.
+   * 5. Conflicting, branching, cyclical, or unauthorized epoch metadata fails closed.
+   */
+  getLatestWitnessReceiptMetadata(
+    options?: GetLatestWitnessReceiptMetadataOptions,
+  ): LatestWitnessReceiptMetadata {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+
+    try {
+      const rows = this.db.prepare(
+        "SELECT authorization_id, witness_receipt_json FROM consumed_authorization_ids WHERE state = 'consumed' AND witness_status = 'COMMITTED' AND witness_receipt_json IS NOT NULL;"
+      ).all() as Array<{ authorization_id: string; witness_receipt_json: string }>;
+
+      if (rows.length === 0) {
+        return Object.freeze({
+          maxSequenceNumber: null,
+          latestEpochId: null,
+          witnessId: null,
+        });
+      }
+
+      interface EpochRecord {
+        maxSeq: bigint;
+        maxSeqStr: string;
+        witnessId: string | null;
+        sequences: Map<string, string>; // sequenceNumber -> authorizationId
+      }
+
+      const epochs = new Map<string, EpochRecord>();
+
+      for (const row of rows) {
+        let parsed: any;
+        try {
+          parsed = JSON.parse(row.witness_receipt_json);
+        } catch (e) {
+          throw new Error(
+            `Malformed receipt JSON in committed authorization '${row.authorization_id}': cannot parse. Halting startup.`,
+          );
+        }
+
+        if (!parsed || typeof parsed !== "object") {
+          throw new Error(
+            `Invalid receipt in committed authorization '${row.authorization_id}': receipt must be a JSON object.`,
+          );
+        }
+
+        const epochId = parsed.epochId;
+        if (typeof epochId !== "string" || epochId.trim().length === 0) {
+          throw new Error(
+            `Invalid receipt in committed authorization '${row.authorization_id}': epochId must be a non-empty string.`,
+          );
+        }
+
+        const seqStr = parsed.sequenceNumber;
+        if (typeof seqStr !== "string" || !/^\d+$/.test(seqStr)) {
+          throw new Error(
+            `Invalid receipt in committed authorization '${row.authorization_id}': sequenceNumber must be a canonical integer string.`,
+          );
+        }
+
+        let seq: bigint;
+        try {
+          seq = BigInt(seqStr);
+        } catch {
+          throw new Error(
+            `Invalid sequence number in committed authorization '${row.authorization_id}': ${seqStr}`,
+          );
+        }
+
+        const witnessId = typeof parsed.witnessId === "string" ? parsed.witnessId : null;
+
+        let epochRec = epochs.get(epochId);
+        if (!epochRec) {
+          epochRec = {
+            maxSeq: seq,
+            maxSeqStr: seqStr,
+            witnessId,
+            sequences: new Map<string, string>(),
+          };
+          epochs.set(epochId, epochRec);
+        }
+
+        // Duplicate sequence number check within the same epoch (SEC-M13C-05)
+        const existingAuthId = epochRec.sequences.get(seqStr);
+        if (existingAuthId !== undefined && existingAuthId !== row.authorization_id) {
+          throw new Error(
+            `Conflicting receipt metadata: duplicate sequence number '${seqStr}' in epoch '${epochId}' for distinct authorizations '${existingAuthId}' and '${row.authorization_id}'.`,
+          );
+        }
+        epochRec.sequences.set(seqStr, row.authorization_id);
+
+        if (seq > epochRec.maxSeq) {
+          epochRec.maxSeq = seq;
+          epochRec.maxSeqStr = seqStr;
+        }
+
+        if (witnessId !== null) {
+          if (epochRec.witnessId !== null && epochRec.witnessId !== witnessId) {
+            throw new Error(
+              `Conflicting witnessId in epoch '${epochId}': '${epochRec.witnessId}' vs '${witnessId}'.`,
+            );
+          }
+          epochRec.witnessId = witnessId;
+        }
+      }
+
+      const distinctEpochs = Array.from(epochs.keys());
+      if (distinctEpochs.length === 1) {
+        const onlyEpoch = distinctEpochs[0];
+        const rec = epochs.get(onlyEpoch)!;
+        return Object.freeze({
+          maxSequenceNumber: rec.maxSeqStr,
+          latestEpochId: onlyEpoch,
+          witnessId: rec.witnessId,
+        });
+      }
+
+      // Multiple epochs exist. We must determine the latest epoch using authenticated transition rules.
+      const rules = options?.allowedEpochTransitions ?? this.allowedEpochTransitions;
+      if (!rules || rules.length === 0) {
+        throw new Error(
+          `Conflicting or unauthorized epoch metadata in stored receipts: multiple epochs present (${distinctEpochs.join(
+            ", ",
+          )}) without any configured epoch transition rules.`,
+        );
+      }
+
+      // Build transition graph among epochs present in the store
+      const adj = new Map<string, Set<string>>();
+      for (const rule of rules) {
+        if (typeof rule.fromEpochId !== "string" || typeof rule.toEpochId !== "string") {
+          continue;
+        }
+        let set = adj.get(rule.fromEpochId);
+        if (!set) {
+          set = new Set();
+          adj.set(rule.fromEpochId, set);
+        }
+        set.add(rule.toEpochId);
+      }
+
+      const isReachable = (src: string, dst: string): boolean => {
+        if (src === dst) return true;
+        const visited = new Set<string>();
+        const queue = [src];
+        visited.add(src);
+        while (queue.length > 0) {
+          const curr = queue.shift()!;
+          const neighbors = adj.get(curr);
+          if (neighbors) {
+            for (const next of neighbors) {
+              if (next === dst) return true;
+              if (!visited.has(next)) {
+                visited.add(next);
+                queue.push(next);
+              }
+            }
+          }
+        }
+        return false;
+      };
+
+      // Check for cycles among distinctEpochs
+      for (let i = 0; i < distinctEpochs.length; i++) {
+        for (let j = i + 1; j < distinctEpochs.length; j++) {
+          const A = distinctEpochs[i];
+          const B = distinctEpochs[j];
+          if (isReachable(A, B) && isReachable(B, A)) {
+            throw new Error(
+              `Cycle detected in epoch transition rules between '${A}' and '${B}'. Halting to prevent state corruption.`,
+            );
+          }
+        }
+      }
+
+      // Find candidates for the latest epoch:
+      // An epoch is a candidate for latest if NO other epoch in distinctEpochs is reachable from it.
+      const candidates: string[] = [];
+      for (const ep of distinctEpochs) {
+        let hasSuccessorInStore = false;
+        for (const other of distinctEpochs) {
+          if (ep !== other && isReachable(ep, other)) {
+            hasSuccessorInStore = true;
+            break;
+          }
+        }
+        if (!hasSuccessorInStore) {
+          candidates.push(ep);
+        }
+      }
+
+      if (candidates.length === 0) {
+        throw new Error(
+          `Conflicting epoch metadata: could not find terminal epoch among (${distinctEpochs.join(", ")}).`,
+        );
+      }
+
+      if (candidates.length > 1) {
+        throw new Error(
+          `Conflicting or unauthorized epoch metadata in stored receipts: branching or unconnected epochs detected (${candidates.join(
+            ", ",
+          )}). Cannot determine authoritative latest epoch.`,
+        );
+      }
+
+      const latestEpoch = candidates[0];
+
+      // Verify that EVERY other epoch in distinctEpochs can reach latestEpoch via allowed transitions
+      for (const other of distinctEpochs) {
+        if (other !== latestEpoch && !isReachable(other, latestEpoch)) {
+          throw new Error(
+            `Unauthorized epoch transition: epoch '${other}' has no authenticated transition path to latest epoch '${latestEpoch}'.`,
+          );
+        }
+      }
+
+      const latestRec = epochs.get(latestEpoch)!;
+      return Object.freeze({
+        maxSequenceNumber: latestRec.maxSeqStr,
+        latestEpochId: latestEpoch,
+        witnessId: latestRec.witnessId,
       });
     } catch (err) {
       this.handleFatalIO(err);
