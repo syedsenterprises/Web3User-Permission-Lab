@@ -13,6 +13,12 @@ export {
   type Web3UserEngineOptions,
   type IssueAuthorizationParams,
   type ConsumeAuthorizationParams,
+  type ReconciliationOutcome,
+  type ReconcileAuthorizationOptions,
+  type ReconcileAuthorizationResult,
+  type ReconcileAllOptions,
+  type ReconcileAllSummary,
+  type ReconcileAllResult,
   // Typed Error Contract
   Web3UserError,
   EngineClosedError,
@@ -36,7 +42,15 @@ export {
   type AuthorizationIdStore,
   type AuthorizationRecord,
   type AuthorizationState,
+  type WitnessStatus,
+  type UnreconciledWitnessStatus,
+  type ListUnreconciledWitnessRecordsOptions,
+  type UnreconciledWitnessRecord,
+  type PersistWitnessReceiptParams,
 } from "./authorization-store.js";
+
+export type UnreconciledAuthorization = import("./authorization-store.js").UnreconciledWitnessRecord;
+export type ListUnreconciledAuthorizationsOptions = import("./authorization-store.js").ListUnreconciledWitnessRecordsOptions;
 
 export {
   SQLitePolicyStore,
@@ -67,6 +81,7 @@ export {
 export {
   issueSignedTransactionAuthorizationV3,
   consumeSignedTransactionAuthorizationV3,
+  consumeSignedTransactionAuthorizationV3Async,
   cancelAuthorization,
   cancelSignedTransactionAuthorizationV3,
   DEFAULT_AUTHORIZATION_TTL_SECONDS,
@@ -81,6 +96,7 @@ export {
   generateIssuerKeyPair,
   parseEd25519PublicKey,
   parseEd25519PrivateKey,
+  areEd25519PublicKeysEqual,
   signAuthorizationPayload,
   verifyAuthorizationPayload,
   canonicalSignedPayloadV3,
@@ -169,6 +185,12 @@ export {
   type MonotonicWitnessAdapter,
   type LocalDeterministicWitnessOptions,
   LocalDeterministicWitness,
+  type SQLiteDurableWitnessOptions,
+  SQLiteDurableWitness,
+  DurableWitnessError,
+  CorruptedWitnessDatabaseError,
+  WitnessStorageUnavailableError,
+  InvalidWitnessStateTransitionError,
   canonicalWitnessReceiptPayload,
   verifyWitnessReceipt,
 } from "./monotonic-witness.js";

@@ -5,6 +5,10 @@ import {
   type CheckpointMode,
   type CheckpointResult,
   type AuthorizationRecord,
+  type ListUnreconciledWitnessRecordsOptions,
+  type UnreconciledWitnessRecord,
+  type UnreconciledWitnessStatus,
+  type WitnessStatus,
 } from "./authorization-store.js";
 import {
   type PolicyRecord,
@@ -18,12 +22,15 @@ import type { IssuerKeyMetadata, KeyStatus } from "./key-registry.js";
 import {
   issueSignedTransactionAuthorizationV3,
   consumeSignedTransactionAuthorizationV3,
+  consumeSignedTransactionAuthorizationV3Async,
   cancelAuthorization,
   type V3Signer,
   type SignedTransactionAuthorizationV3,
 } from "./authorization-lifecycle.js";
 import {
   generateIssuerKeyPair,
+  parseEd25519PublicKey,
+  areEd25519PublicKeysEqual,
   type SignedAuthorizationArtifactV3,
 } from "./authorization-crypto.js";
 import {
@@ -42,7 +49,13 @@ import {
 import { isFatalIOError } from "./sqlite-transaction.js";
 import type { TransactionAuthorization } from "./policy-transaction.js";
 import type { Clock, MonotonicClock } from "./clock.js";
-import type { MonotonicWitnessAdapter } from "./monotonic-witness.js";
+import {
+  type MonotonicWitnessAdapter,
+  type SignedWitnessReceipt,
+  type WitnessReconcileResult,
+  canonicalWitnessReceiptPayload,
+  verifyWitnessReceipt,
+} from "./monotonic-witness.js";
 
 // ============================================================================
 // Error Hierarchy
@@ -214,6 +227,12 @@ export interface Web3UserEngineOptions {
    * Optional monotonic witness adapter for multi-node rollback resistance and witness receipts.
    */
   readonly witnessAdapter?: MonotonicWitnessAdapter;
+
+  /**
+   * Optional witness public key for verifying signed witness receipts.
+   * If omitted, falls back to witnessAdapter.publicKeyPem if available.
+   */
+  readonly witnessPublicKey?: string | KeyObject;
 }
 
 /**
@@ -276,6 +295,11 @@ export interface ConsumeAuthorizationParams {
   readonly witnessAdapter?: MonotonicWitnessAdapter;
 
   /**
+   * Optional witness public key override for verifying the returned witness receipt.
+   */
+  readonly witnessPublicKey?: string | KeyObject;
+
+  /**
    * Optional idempotency key for witness reservation deduplication.
    */
   readonly idempotencyKey?: string;
@@ -284,6 +308,107 @@ export interface ConsumeAuthorizationParams {
    * Optional lease TTL in seconds for the witness reservation (default: 30s).
    */
   readonly leaseTtlSeconds?: number;
+}
+
+/**
+ * Reconciliation outcome classifications for Web3User authorizations.
+ */
+export type ReconciliationOutcome =
+  | "ALREADY_COMMITTED"
+  | "RECONCILED"
+  | "PENDING"
+  | "DISPUTED"
+  | "NOT_FOUND"
+  | "NOT_CONSUMED"
+  | "NOT_WITNESSED"
+  | "UNAVAILABLE";
+
+/**
+ * Options for single-authorization reconciliation.
+ */
+export interface ReconcileAuthorizationOptions {
+  /**
+   * Optional witness adapter override. If provided, its public key must match
+   * the engine's configured witness trust anchor.
+   */
+  readonly witnessAdapter?: MonotonicWitnessAdapter;
+
+  /**
+   * Optional witness public key override. If provided, it must match
+   * the engine's configured witness trust anchor.
+   */
+  readonly witnessPublicKey?: string | KeyObject;
+}
+
+/**
+ * Result of single-authorization reconciliation.
+ */
+export interface ReconcileAuthorizationResult {
+  readonly authorizationId: string;
+  readonly outcome: ReconciliationOutcome;
+  readonly previousStatus?: WitnessStatus;
+  readonly currentStatus?: WitnessStatus;
+  readonly ticketId?: string;
+  readonly receipt?: SignedWitnessReceipt;
+  readonly reasons?: string[];
+}
+
+/**
+ * Options for bounded batch reconciliation.
+ */
+export interface ReconcileAllOptions extends ReconcileAuthorizationOptions {
+  /**
+   * Filter discovery by unresolved status ('PENDING_COMMIT' | 'DISPUTED').
+   * If omitted, discovers both statuses.
+   */
+  readonly status?: UnreconciledWitnessStatus;
+
+  /**
+   * Maximum number of unresolved records to discover and reconcile.
+   * Integer between 1 and 1000. Defaults to 100.
+   */
+  readonly limit?: number;
+
+  /**
+   * Maximum number of concurrent reconciliation workers.
+   * Integer between 1 and 10. Defaults to 4.
+   */
+  readonly concurrency?: number;
+
+  /**
+   * Optional AbortSignal to gracefully cancel processing of remaining authorizations in the batch.
+   */
+  readonly signal?: AbortSignal;
+
+  /**
+   * Optional timeout in milliseconds for the batch reconciliation.
+   * When elapsed, in-flight operations settle and remaining authorizations are cancelled.
+   */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * Summary counts of reconciliation outcomes across a batch operation.
+ */
+export interface ReconcileAllSummary {
+  readonly totalDiscovered: number;
+  readonly totalProcessed: number;
+  readonly reconciledCount: number;
+  readonly alreadyCommittedCount: number;
+  readonly pendingCount: number;
+  readonly disputedCount: number;
+  readonly unavailableCount: number;
+  readonly errorCount: number;
+}
+
+/**
+ * Result of a bounded batch reconciliation operation.
+ */
+export interface ReconcileAllResult {
+  readonly summary: ReconcileAllSummary;
+  readonly results: ReadonlyArray<ReconcileAuthorizationResult>;
+  readonly aborted: boolean;
+  readonly abortReason?: string;
 }
 
 // ============================================================================
@@ -299,6 +424,7 @@ export interface ConsumeAuthorizationParams {
 export class Web3UserEngine {
   private readonly store: SQLiteAuthorizationStore;
   private readonly witnessAdapter?: MonotonicWitnessAdapter;
+  private readonly witnessPublicKey?: KeyObject;
   private isClosed = false;
 
   public constructor(options: Web3UserEngineOptions) {
@@ -309,7 +435,29 @@ export class Web3UserEngine {
       throw new ValidationError("databasePath must be a non-empty string.");
     }
 
+    let trustedWitnessKey: KeyObject | undefined;
+    if (options.witnessPublicKey) {
+      const parsed = parseEd25519PublicKey(options.witnessPublicKey);
+      if (!parsed) {
+        throw new ValidationError("Configured witnessPublicKey is not a valid Ed25519 public key.");
+      }
+      trustedWitnessKey = parsed;
+    }
+
+    if (options.witnessAdapter?.publicKeyPem) {
+      const adapterKey = parseEd25519PublicKey(options.witnessAdapter.publicKeyPem);
+      if (adapterKey) {
+        if (trustedWitnessKey && !areEd25519PublicKeysEqual(trustedWitnessKey, adapterKey)) {
+          throw new ValidationError("Configured witnessPublicKey conflicts with witnessAdapter.publicKeyPem.");
+        }
+        if (!trustedWitnessKey) {
+          trustedWitnessKey = adapterKey;
+        }
+      }
+    }
+
     this.witnessAdapter = options.witnessAdapter;
+    this.witnessPublicKey = trustedWitnessKey;
 
     try {
       this.store = new SQLiteAuthorizationStore(options.databasePath, {
@@ -320,6 +468,7 @@ export class Web3UserEngine {
         busyTimeoutMs: options.durability?.busyTimeoutMs ?? 5000,
         onFatalTaint: options.onFatalTaint,
         allowLegacyArtifactVersions: options.allowLegacyArtifactVersions ?? false,
+        witnessPublicKey: this.witnessPublicKey,
       });
     } catch (err) {
       throw wrapEngineError(err);
@@ -413,6 +562,31 @@ export class Web3UserEngine {
         envelope = created.envelope;
       }
 
+      if (params.witnessPublicKey) {
+        if (!this.witnessPublicKey) {
+          throw new ValidationError(
+            "Cannot supply per-call witnessPublicKey: no witness trust anchor is configured on Web3UserEngine.",
+          );
+        }
+        if (!areEd25519PublicKeysEqual(params.witnessPublicKey, this.witnessPublicKey)) {
+          throw new ValidationError(
+            "Supplied witnessPublicKey conflicts with configured engine witness trust anchor.",
+          );
+        }
+      }
+      if (params.witnessAdapter?.publicKeyPem) {
+        if (!this.witnessPublicKey) {
+          throw new ValidationError(
+            "Cannot supply per-call witnessAdapter: no witness trust anchor is configured on Web3UserEngine.",
+          );
+        }
+        if (!areEd25519PublicKeysEqual(params.witnessAdapter.publicKeyPem, this.witnessPublicKey)) {
+          throw new ValidationError(
+            "Supplied witnessAdapter public key conflicts with configured engine witness trust anchor.",
+          );
+        }
+      }
+
       const witness = params.witnessAdapter ?? this.witnessAdapter;
       return consumeSignedTransactionAuthorizationV3(
         this.store,
@@ -422,6 +596,85 @@ export class Web3UserEngine {
         witness
           ? {
               witnessAdapter: witness,
+              witnessPublicKey: this.witnessPublicKey,
+              idempotencyKey: params.idempotencyKey,
+              leaseTtlSeconds: params.leaseTtlSeconds,
+            }
+          : undefined,
+      );
+    } catch (err) {
+      this.handleError(err);
+    }
+  }
+
+  /**
+   * Revalidate and consume a signed V3 authorization artifact asynchronously.
+   * Supports asynchronous remote witness adapters, enforces single-use consumption,
+   * and guarantees replay prevention without holding locks during remote calls.
+   */
+  public async consumeAsync(params: ConsumeAuthorizationParams): Promise<TransactionAuthorization> {
+    this.assertOpen();
+    this.assertNotTainted();
+    try {
+      if (!params || typeof params !== "object") {
+        throw new ValidationError("Consume parameters must be an object.");
+      }
+
+      let envelope: TransactionEnvelope;
+      if (params.envelope !== undefined && params.envelope !== null) {
+        if (!matchesTransactionEnvelope(params.envelope, params.request)) {
+          return {
+            decision: "DENY",
+            reasons: ["Transaction does not match the original envelope."],
+          };
+        }
+        envelope = params.envelope as TransactionEnvelope;
+      } else {
+        const created = createTransactionEnvelope(params.request);
+        if (!created.ok) {
+          return {
+            decision: "UNKNOWN",
+            reasons: [created.reason],
+          };
+        }
+        envelope = created.envelope;
+      }
+
+      if (params.witnessPublicKey) {
+        if (!this.witnessPublicKey) {
+          throw new ValidationError(
+            "Cannot supply per-call witnessPublicKey: no witness trust anchor is configured on Web3UserEngine.",
+          );
+        }
+        if (!areEd25519PublicKeysEqual(params.witnessPublicKey, this.witnessPublicKey)) {
+          throw new ValidationError(
+            "Supplied witnessPublicKey conflicts with configured engine witness trust anchor.",
+          );
+        }
+      }
+      if (params.witnessAdapter?.publicKeyPem) {
+        if (!this.witnessPublicKey) {
+          throw new ValidationError(
+            "Cannot supply per-call witnessAdapter: no witness trust anchor is configured on Web3UserEngine.",
+          );
+        }
+        if (!areEd25519PublicKeysEqual(params.witnessAdapter.publicKeyPem, this.witnessPublicKey)) {
+          throw new ValidationError(
+            "Supplied witnessAdapter public key conflicts with configured engine witness trust anchor.",
+          );
+        }
+      }
+
+      const witness = params.witnessAdapter ?? this.witnessAdapter;
+      return await consumeSignedTransactionAuthorizationV3Async(
+        this.store,
+        params.artifact,
+        envelope,
+        params.request,
+        witness
+          ? {
+              witnessAdapter: witness,
+              witnessPublicKey: this.witnessPublicKey,
               idempotencyKey: params.idempotencyKey,
               leaseTtlSeconds: params.leaseTtlSeconds,
             }
@@ -463,6 +716,720 @@ export class Web3UserEngine {
         throw new ValidationError("Authorization ID must be a non-empty string.");
       }
       return this.store.getAuthorizationRecord(authorizationId);
+    } catch (err) {
+      this.handleError(err);
+    }
+  }
+
+  /**
+   * Retrieves a verified, immutable witness receipt for a consumed authorization.
+   * Returns null if the authorization does not exist, was not witnessed, is still
+   * pending commit, is disputed, has corrupted JSON, or fails signature verification.
+   *
+   * @param authorizationId The authorization identifier to look up.
+   * @param witnessPublicKey Optional public key override to verify the receipt signature.
+   */
+  public getWitnessReceipt(
+    authorizationId: string,
+    witnessPublicKey?: string | KeyObject,
+  ): SignedWitnessReceipt | null {
+    this.assertOpen();
+    this.assertNotTainted();
+    try {
+      if (typeof authorizationId !== "string" || authorizationId.trim().length === 0) {
+        throw new ValidationError("Authorization ID must be a non-empty string.");
+      }
+      if (witnessPublicKey) {
+        if (!this.witnessPublicKey) {
+          throw new ValidationError(
+            "Cannot supply per-call witnessPublicKey: no witness trust anchor is configured on Web3UserEngine.",
+          );
+        }
+        if (!areEd25519PublicKeysEqual(witnessPublicKey, this.witnessPublicKey)) {
+          throw new ValidationError(
+            "Supplied witnessPublicKey conflicts with configured engine witness trust anchor.",
+          );
+        }
+      }
+      if (!this.witnessPublicKey) {
+        return null;
+      }
+      return this.store.getWitnessReceipt(authorizationId, this.witnessPublicKey);
+    } catch (err) {
+      this.handleError(err);
+    }
+  }
+
+  /**
+   * Lists unresolved witness records requiring reconciliation.
+   * Delegates to the store's bounded discovery primitive with strict status and limit validation.
+   *
+   * @param options Filtering by status ('PENDING_COMMIT' | 'DISPUTED') and maximum records limit (1..1000).
+   */
+  public listUnreconciledAuthorizations(
+    options?: ListUnreconciledWitnessRecordsOptions,
+  ): ReadonlyArray<UnreconciledWitnessRecord> {
+    this.assertOpen();
+    this.assertNotTainted();
+    try {
+      const records = this.store.listUnreconciledWitnessRecords(options);
+      return Object.freeze(records.slice());
+    } catch (err) {
+      this.handleError(err);
+    }
+  }
+
+  /**
+   * Reconciles a single consumed authorization record against the authoritative witness adapter.
+   *
+   * 1. Validates the authorization ID and options.
+   * 2. Reads the local authorization record from SQLite.
+   * 3. Returns ALREADY_COMMITTED for records with a verified persisted receipt.
+   * 4. Queries the witness adapter for ticket status and receipt outside write transactions.
+   * 5. Validates ticket ID, authorization ID, binding digest, policy, payload schema,
+   *    and Ed25519 signature against the configured trust anchor.
+   * 6. Atomically persists a valid receipt via store-level primitives (supporting PENDING_COMMIT and DISPUTED).
+   * 7. Preserves PENDING_COMMIT or DISPUTED if the remote result is missing, ambiguous, unavailable, or malformed.
+   * 8. Never releases a consumed ticket or overwrites a committed receipt.
+   * 9. Is safe and idempotent across retries and concurrent callers.
+   */
+  public async reconcileAuthorization(
+    authorizationId: string,
+    options?: ReconcileAuthorizationOptions,
+  ): Promise<ReconcileAuthorizationResult> {
+    this.assertOpen();
+    this.assertNotTainted();
+    try {
+      if (typeof authorizationId !== "string" || authorizationId.trim().length === 0) {
+        throw new ValidationError("Authorization ID must be a non-empty string.");
+      }
+      if (authorizationId.trim().length > 128) {
+        throw new ValidationError("Authorization ID exceeds maximum length of 128 characters.");
+      }
+
+      if (options !== undefined && options !== null) {
+        if (typeof options !== "object") {
+          throw new ValidationError("Reconcile options must be an object.");
+        }
+        if (options.witnessPublicKey) {
+          if (!this.witnessPublicKey) {
+            throw new ValidationError(
+              "Cannot supply per-call witnessPublicKey: no witness trust anchor is configured on Web3UserEngine.",
+            );
+          }
+          if (!areEd25519PublicKeysEqual(options.witnessPublicKey, this.witnessPublicKey)) {
+            throw new ValidationError(
+              "Supplied witnessPublicKey conflicts with configured engine witness trust anchor.",
+            );
+          }
+        }
+        if (options.witnessAdapter?.publicKeyPem) {
+          if (!this.witnessPublicKey) {
+            throw new ValidationError(
+              "Cannot supply per-call witnessAdapter: no witness trust anchor is configured on Web3UserEngine.",
+            );
+          }
+          if (!areEd25519PublicKeysEqual(options.witnessAdapter.publicKeyPem, this.witnessPublicKey)) {
+            throw new ValidationError(
+              "Supplied witnessAdapter public key conflicts with configured engine witness trust anchor.",
+            );
+          }
+        }
+      }
+
+      const record = this.store.getAuthorizationRecord(authorizationId);
+      if (!record) {
+        return Object.freeze({
+          authorizationId,
+          outcome: "NOT_FOUND",
+          reasons: [`Authorization '${authorizationId}' was not found.`],
+        });
+      }
+
+      if (record.state !== "consumed") {
+        return Object.freeze({
+          authorizationId,
+          outcome: "NOT_CONSUMED",
+          reasons: [
+            `Authorization '${authorizationId}' is in state '${record.state}', expected 'consumed'.`,
+          ],
+        });
+      }
+
+      if (record.witnessStatus === "NONE" || !record.witnessTicketId) {
+        return Object.freeze({
+          authorizationId,
+          outcome: "NOT_WITNESSED",
+          previousStatus: "NONE",
+          currentStatus: "NONE",
+          reasons: [`Authorization '${authorizationId}' was not witnessed.`],
+        });
+      }
+
+      // Check if already COMMITTED
+      if (record.witnessStatus === "COMMITTED") {
+        const receipt = this.store.getWitnessReceipt(authorizationId);
+        if (receipt) {
+          return Object.freeze({
+            authorizationId,
+            outcome: "ALREADY_COMMITTED",
+            previousStatus: "COMMITTED",
+            currentStatus: "COMMITTED",
+            ticketId: record.witnessTicketId,
+            receipt,
+            reasons: ["Authorization is already committed with a verified witness receipt."],
+          });
+        }
+
+        // Receipt verification failed or corrupt in database
+        this.store.markWitnessDisputed({
+          authorizationId,
+          ticketId: record.witnessTicketId,
+          reason: "PERSISTED_RECEIPT_VERIFICATION_FAILED",
+        });
+        return Object.freeze({
+          authorizationId,
+          outcome: "DISPUTED",
+          previousStatus: "COMMITTED",
+          currentStatus: "DISPUTED",
+          ticketId: record.witnessTicketId,
+          reasons: [
+            "Persisted receipt verification failed against configured engine trust anchor.",
+          ],
+        });
+      }
+
+      // Ensure configured trust anchor exists
+      if (!this.witnessPublicKey) {
+        return Object.freeze({
+          authorizationId,
+          outcome: "UNAVAILABLE",
+          previousStatus: record.witnessStatus,
+          currentStatus: record.witnessStatus,
+          ticketId: record.witnessTicketId,
+          reasons: ["No witness trust anchor is configured on Web3UserEngine."],
+        });
+      }
+
+      const witness = options?.witnessAdapter ?? this.witnessAdapter;
+      if (!witness) {
+        return Object.freeze({
+          authorizationId,
+          outcome: "UNAVAILABLE",
+          previousStatus: record.witnessStatus,
+          currentStatus: record.witnessStatus,
+          ticketId: record.witnessTicketId,
+          reasons: ["No witness adapter is configured or provided for reconciliation."],
+        });
+      }
+
+      // Query the authoritative witness adapter outside SQLite write transactions and mutexes
+      let remoteRes: WitnessReconcileResult;
+      try {
+        remoteRes = await witness.reconcileTicket({
+          ticketId: record.witnessTicketId,
+          authorizationId,
+        });
+      } catch (err) {
+        return Object.freeze({
+          authorizationId,
+          outcome: "UNAVAILABLE",
+          previousStatus: record.witnessStatus,
+          currentStatus: record.witnessStatus,
+          ticketId: record.witnessTicketId,
+          reasons: [
+            `Witness adapter reconcile query failed: ${err instanceof Error ? err.message : String(err)}`,
+          ],
+        });
+      }
+
+      if (!remoteRes || typeof remoteRes !== "object") {
+        return Object.freeze({
+          authorizationId,
+          outcome: "UNAVAILABLE",
+          previousStatus: record.witnessStatus,
+          currentStatus: record.witnessStatus,
+          ticketId: record.witnessTicketId,
+          reasons: ["Witness adapter returned an invalid response."],
+        });
+      }
+
+      // If a signed receipt is provided, validate and persist it
+      if (remoteRes.receipt) {
+        const receipt = remoteRes.receipt;
+
+        // Identity checks
+        if (
+          receipt.authorizationId !== authorizationId ||
+          receipt.ticketId !== record.witnessTicketId ||
+          (record.bindingDigest !== null && receipt.bindingDigest !== record.bindingDigest)
+        ) {
+          this.store.markWitnessDisputed({
+            authorizationId,
+            ticketId: record.witnessTicketId,
+            reason: "RECONCILED_RECEIPT_IDENTITY_MISMATCH",
+          });
+          return Object.freeze({
+            authorizationId,
+            outcome: "DISPUTED",
+            previousStatus: record.witnessStatus,
+            currentStatus: "DISPUTED",
+            ticketId: record.witnessTicketId,
+            reasons: [
+              "Reconciled receipt identity or binding digest does not match stored authorization record.",
+            ],
+          });
+        }
+
+        // Policy identity & revision structure
+        if (
+          typeof receipt.policyId !== "string" ||
+          receipt.policyId.trim().length === 0 ||
+          typeof receipt.policyRevision !== "number" ||
+          !Number.isSafeInteger(receipt.policyRevision) ||
+          receipt.policyRevision < 1
+        ) {
+          this.store.markWitnessDisputed({
+            authorizationId,
+            ticketId: record.witnessTicketId,
+            reason: "RECONCILED_RECEIPT_INVALID_POLICY",
+          });
+          return Object.freeze({
+            authorizationId,
+            outcome: "DISPUTED",
+            previousStatus: record.witnessStatus,
+            currentStatus: "DISPUTED",
+            ticketId: record.witnessTicketId,
+            reasons: ["Reconciled receipt has invalid policy ID or revision."],
+          });
+        }
+
+        // Canonical payload structure
+        try {
+          canonicalWitnessReceiptPayload(receipt);
+        } catch {
+          this.store.markWitnessDisputed({
+            authorizationId,
+            ticketId: record.witnessTicketId,
+            reason: "RECONCILED_RECEIPT_PAYLOAD_INVALID",
+          });
+          return Object.freeze({
+            authorizationId,
+            outcome: "DISPUTED",
+            previousStatus: record.witnessStatus,
+            currentStatus: "DISPUTED",
+            ticketId: record.witnessTicketId,
+            reasons: ["Reconciled receipt payload structure is invalid."],
+          });
+        }
+
+        // Cryptographic signature check against engine trust anchor
+        if (!verifyWitnessReceipt(this.witnessPublicKey, receipt)) {
+          this.store.markWitnessDisputed({
+            authorizationId,
+            ticketId: record.witnessTicketId,
+            reason: "RECONCILED_RECEIPT_SIGNATURE_INVALID",
+          });
+          return Object.freeze({
+            authorizationId,
+            outcome: "DISPUTED",
+            previousStatus: record.witnessStatus,
+            currentStatus: "DISPUTED",
+            ticketId: record.witnessTicketId,
+            reasons: [
+              "Reconciled receipt signature verification failed against configured engine trust anchor.",
+            ],
+          });
+        }
+
+        // Persist receipt atomically via store primitive
+        const persistRes = this.store.persistWitnessReceipt({
+          authorizationId,
+          ticketId: record.witnessTicketId,
+          receiptJson: JSON.stringify(receipt),
+          allowDisputed: true,
+        });
+
+        if (persistRes.success) {
+          if (persistRes.alreadyCommitted) {
+            return Object.freeze({
+              authorizationId,
+              outcome: "ALREADY_COMMITTED",
+              previousStatus: record.witnessStatus,
+              currentStatus: "COMMITTED",
+              ticketId: record.witnessTicketId,
+              receipt,
+              reasons: ["Receipt was already committed in store."],
+            });
+          }
+          return Object.freeze({
+            authorizationId,
+            outcome: "RECONCILED",
+            previousStatus: record.witnessStatus,
+            currentStatus: "COMMITTED",
+            ticketId: record.witnessTicketId,
+            receipt,
+          });
+        }
+
+        return Object.freeze({
+          authorizationId,
+          outcome: "DISPUTED",
+          previousStatus: record.witnessStatus,
+          currentStatus: "DISPUTED",
+          ticketId: record.witnessTicketId,
+          reasons: [`Persisting reconciled receipt failed: ${persistRes.reason}`],
+        });
+      }
+
+      // No receipt provided in remote response
+      if (remoteRes.state === "DISPUTED") {
+        this.store.markWitnessDisputed({
+          authorizationId,
+          ticketId: record.witnessTicketId,
+          reason: "REMOTE_WITNESS_DISPUTED",
+        });
+        return Object.freeze({
+          authorizationId,
+          outcome: "DISPUTED",
+          previousStatus: record.witnessStatus,
+          currentStatus: "DISPUTED",
+          ticketId: record.witnessTicketId,
+          reasons: remoteRes.reasons ?? ["Remote witness reported ticket is disputed."],
+        });
+      }
+
+      if (remoteRes.state === "RELEASED") {
+        this.store.markWitnessDisputed({
+          authorizationId,
+          ticketId: record.witnessTicketId,
+          reason: "WITNESS_TICKET_PREMATURELY_RELEASED",
+        });
+        return Object.freeze({
+          authorizationId,
+          outcome: "DISPUTED",
+          previousStatus: record.witnessStatus,
+          currentStatus: "DISPUTED",
+          ticketId: record.witnessTicketId,
+          reasons: ["Remote witness ticket was released while authorization is marked consumed."],
+        });
+      }
+
+      if (remoteRes.state === "COMMITTED") {
+        // Ticket reported committed remotely, but receipt is missing.
+        // Preserve existing status (PENDING_COMMIT or DISPUTED) pending receipt recovery.
+        return Object.freeze({
+          authorizationId,
+          outcome: record.witnessStatus === "DISPUTED" ? "DISPUTED" : "PENDING",
+          previousStatus: record.witnessStatus,
+          currentStatus: record.witnessStatus,
+          ticketId: record.witnessTicketId,
+          reasons: [
+            "Remote witness reported ticket COMMITTED, but receipt was not provided in response.",
+          ],
+        });
+      }
+
+      if (remoteRes.state === "RESERVED" || remoteRes.state === "QUARANTINED_UNCONFIRMED") {
+        return Object.freeze({
+          authorizationId,
+          outcome: record.witnessStatus === "DISPUTED" ? "DISPUTED" : "PENDING",
+          previousStatus: record.witnessStatus,
+          currentStatus: record.witnessStatus,
+          ticketId: record.witnessTicketId,
+          reasons: [
+            `Remote witness ticket is in state '${remoteRes.state}' and has not been committed.`,
+          ],
+        });
+      }
+
+      // Unknown or unhandled state
+      return Object.freeze({
+        authorizationId,
+        outcome: record.witnessStatus === "DISPUTED" ? "DISPUTED" : "PENDING",
+        previousStatus: record.witnessStatus,
+        currentStatus: record.witnessStatus,
+        ticketId: record.witnessTicketId,
+        reasons: [`Remote witness reported unrecognized state '${remoteRes.state}'.`],
+      });
+    } catch (err) {
+      this.handleError(err);
+    }
+  }
+
+  /**
+   * Bounded batch reconciliation of unresolved witness records.
+   *
+   * 1. Uses bounded discovery (`listUnreconciledAuthorizations`) with validated limit (1..1000).
+   * 2. Deduplicates discovered authorization IDs while strictly preserving discovery order.
+   * 3. Orchestrates execution using a bounded worker pool governed by concurrency limit (1..10, default: 4).
+   * 4. Dispatches each item to the audited `reconcileAuthorization` method.
+   * 5. Supports cancellation via AbortSignal and overall timeout via timeoutMs.
+   * 6. Preserves deterministic result ordering matching discovery order.
+   * 7. Returns an immutable aggregate result with per-authorization outcomes and summary counters.
+   * 8. Isolates failures so that an individual worker/authorization failure does not abort or corrupt others.
+   */
+  public async reconcileAll(options?: ReconcileAllOptions): Promise<ReconcileAllResult> {
+    this.assertOpen();
+    this.assertNotTainted();
+    try {
+      if (options !== undefined && options !== null) {
+        if (typeof options !== "object") {
+          throw new ValidationError("ReconcileAll options must be an object.");
+        }
+        if (options.limit !== undefined) {
+          if (
+            typeof options.limit !== "number" ||
+            !Number.isSafeInteger(options.limit) ||
+            options.limit < 1 ||
+            options.limit > 1000
+          ) {
+            throw new ValidationError("Limit must be a positive integer between 1 and 1000.");
+          }
+        }
+        if (options.concurrency !== undefined) {
+          if (
+            typeof options.concurrency !== "number" ||
+            !Number.isSafeInteger(options.concurrency) ||
+            options.concurrency < 1 ||
+            options.concurrency > 10
+          ) {
+            throw new ValidationError("Concurrency must be a positive integer between 1 and 10.");
+          }
+        }
+        if (
+          options.status !== undefined &&
+          options.status !== "PENDING_COMMIT" &&
+          options.status !== "DISPUTED"
+        ) {
+          throw new ValidationError("Invalid status filter: expected 'PENDING_COMMIT' or 'DISPUTED'.");
+        }
+        if (options.timeoutMs !== undefined) {
+          if (
+            typeof options.timeoutMs !== "number" ||
+            !Number.isSafeInteger(options.timeoutMs) ||
+            options.timeoutMs <= 0
+          ) {
+            throw new ValidationError("timeoutMs must be a positive safe integer.");
+          }
+        }
+        if (options.signal !== undefined) {
+          if (
+            typeof options.signal !== "object" ||
+            options.signal === null ||
+            typeof options.signal.aborted !== "boolean"
+          ) {
+            throw new ValidationError("signal must be an instance of AbortSignal.");
+          }
+        }
+        if (options.witnessPublicKey) {
+          if (!this.witnessPublicKey) {
+            throw new ValidationError(
+              "Cannot supply per-call witnessPublicKey: no witness trust anchor is configured on Web3UserEngine.",
+            );
+          }
+          if (!areEd25519PublicKeysEqual(options.witnessPublicKey, this.witnessPublicKey)) {
+            throw new ValidationError(
+              "Supplied witnessPublicKey conflicts with configured engine witness trust anchor.",
+            );
+          }
+        }
+        if (options.witnessAdapter?.publicKeyPem) {
+          if (!this.witnessPublicKey) {
+            throw new ValidationError(
+              "Cannot supply per-call witnessAdapter: no witness trust anchor is configured on Web3UserEngine.",
+            );
+          }
+          if (!areEd25519PublicKeysEqual(options.witnessAdapter.publicKeyPem, this.witnessPublicKey)) {
+            throw new ValidationError(
+              "Supplied witnessAdapter public key conflicts with configured engine witness trust anchor.",
+            );
+          }
+        }
+      }
+
+      const limit = options?.limit ?? 100;
+      const concurrency = options?.concurrency ?? 4;
+
+      // 1. Discover unreconciled authorizations
+      const discovered = this.listUnreconciledAuthorizations({
+        status: options?.status,
+        limit,
+      });
+
+      // 2. Deduplicate authorization IDs while strictly preserving discovery order
+      const uniqueIds: string[] = [];
+      const seen = new Set<string>();
+      for (const item of discovered) {
+        if (!seen.has(item.authorizationId)) {
+          seen.add(item.authorizationId);
+          uniqueIds.push(item.authorizationId);
+        }
+      }
+
+      if (uniqueIds.length === 0) {
+        const emptySummary: ReconcileAllSummary = Object.freeze({
+          totalDiscovered: 0,
+          totalProcessed: 0,
+          reconciledCount: 0,
+          alreadyCommittedCount: 0,
+          pendingCount: 0,
+          disputedCount: 0,
+          unavailableCount: 0,
+          errorCount: 0,
+        });
+        return Object.freeze({
+          summary: emptySummary,
+          results: Object.freeze([]),
+          aborted: false,
+        });
+      }
+
+      // 3. Setup cancellation and timeout controllers
+      let isAborted = false;
+      let abortReason: string | undefined;
+
+      const abortHandler = () => {
+        isAborted = true;
+        abortReason = options?.signal?.reason
+          ? String(options.signal.reason)
+          : "Reconciliation aborted by signal.";
+      };
+
+      if (options?.signal) {
+        if (options.signal.aborted) {
+          isAborted = true;
+          abortReason = options.signal.reason
+            ? String(options.signal.reason)
+            : "Reconciliation aborted by signal.";
+        } else {
+          options.signal.addEventListener("abort", abortHandler, { once: true });
+        }
+      }
+
+      let timeoutTimer: NodeJS.Timeout | undefined;
+      if (options?.timeoutMs !== undefined && !isAborted) {
+        timeoutTimer = setTimeout(() => {
+          isAborted = true;
+          if (!abortReason) {
+            abortReason = `Reconciliation batch timed out after ${options.timeoutMs}ms.`;
+          }
+        }, options.timeoutMs);
+      }
+
+      // 4. Bounded worker pool execution
+      const results = new Array<ReconcileAuthorizationResult>(uniqueIds.length);
+      let nextIndex = 0;
+
+      const reconcileItem = async (index: number, authId: string): Promise<void> => {
+        try {
+          const res = await this.reconcileAuthorization(authId, {
+            witnessAdapter: options?.witnessAdapter,
+            witnessPublicKey: options?.witnessPublicKey,
+          });
+          results[index] = res;
+        } catch (err) {
+          results[index] = Object.freeze({
+            authorizationId: authId,
+            outcome: "UNAVAILABLE",
+            reasons: [
+              `Reconciliation worker encountered an error: ${err instanceof Error ? err.message : String(err)}`,
+            ],
+          });
+        }
+      };
+
+      const workerCount = Math.min(concurrency, uniqueIds.length);
+      const workers: Promise<void>[] = [];
+
+      for (let w = 0; w < workerCount; w++) {
+        workers.push(
+          (async () => {
+            while (true) {
+              if (isAborted) {
+                break;
+              }
+              const currentIndex = nextIndex++;
+              if (currentIndex >= uniqueIds.length) {
+                break;
+              }
+              await reconcileItem(currentIndex, uniqueIds[currentIndex]);
+            }
+          })(),
+        );
+      }
+
+      await Promise.all(workers);
+
+      // Clean up timer and listener
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer);
+      }
+      if (options?.signal) {
+        options.signal.removeEventListener("abort", abortHandler);
+      }
+
+      // 5. Fill any unstarted items due to abort
+      for (let i = 0; i < uniqueIds.length; i++) {
+        if (!results[i]) {
+          results[i] = Object.freeze({
+            authorizationId: uniqueIds[i],
+            outcome: "UNAVAILABLE",
+            reasons: [
+              `Reconciliation aborted before execution: ${abortReason ?? "Batch cancelled."}`,
+            ],
+          });
+        }
+      }
+
+      // 6. Aggregate summary counters
+      let reconciledCount = 0;
+      let alreadyCommittedCount = 0;
+      let pendingCount = 0;
+      let disputedCount = 0;
+      let unavailableCount = 0;
+      let errorCount = 0;
+
+      for (const res of results) {
+        switch (res.outcome) {
+          case "RECONCILED":
+            reconciledCount++;
+            break;
+          case "ALREADY_COMMITTED":
+            alreadyCommittedCount++;
+            break;
+          case "PENDING":
+            pendingCount++;
+            break;
+          case "DISPUTED":
+            disputedCount++;
+            break;
+          case "UNAVAILABLE":
+            unavailableCount++;
+            break;
+          default:
+            errorCount++;
+            break;
+        }
+      }
+
+      const summary: ReconcileAllSummary = Object.freeze({
+        totalDiscovered: uniqueIds.length,
+        totalProcessed: results.length,
+        reconciledCount,
+        alreadyCommittedCount,
+        pendingCount,
+        disputedCount,
+        unavailableCount,
+        errorCount,
+      });
+
+      return Object.freeze({
+        summary,
+        results: Object.freeze(results),
+        aborted: isAborted,
+        ...(abortReason !== undefined ? { abortReason } : {}),
+      });
     } catch (err) {
       this.handleError(err);
     }

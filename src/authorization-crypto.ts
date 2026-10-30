@@ -73,6 +73,23 @@ export function parseEd25519PublicKey(key: KeyObject | string): KeyObject | null
 }
 
 /**
+ * Safely compares two Ed25519 public keys for cryptographic equivalence.
+ * Returns true if both keys are valid Ed25519 public keys and encode identical SPKI DER bytes.
+ */
+export function areEd25519PublicKeysEqual(
+  a: KeyObject | string | null | undefined,
+  b: KeyObject | string | null | undefined,
+): boolean {
+  if (!a || !b) return false;
+  const keyA = parseEd25519PublicKey(a);
+  const keyB = parseEd25519PublicKey(b);
+  if (!keyA || !keyB) return false;
+  const derA = keyA.export({ type: "spki", format: "der" });
+  const derB = keyB.export({ type: "spki", format: "der" });
+  return derA.equals(derB);
+}
+
+/**
  * Validates and extracts an Ed25519 private KeyObject from a KeyObject or PEM string.
  * Returns null if the key is invalid or not an Ed25519 private key.
  */

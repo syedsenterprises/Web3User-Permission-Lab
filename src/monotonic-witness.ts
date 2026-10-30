@@ -139,6 +139,7 @@ export interface UnfinalizedWitnessTicket {
 export interface MonotonicWitnessAdapter {
   readonly name: string;
   readonly isTestOnlyMock: boolean;
+  readonly publicKeyPem?: string;
 
   getSyncStatus(lastSeenEpoch?: string, lastSeenSeq?: string): Promise<WitnessSyncStatus> | WitnessSyncStatus;
 
@@ -743,3 +744,6 @@ export class LocalDeterministicWitness implements MonotonicWitnessAdapter {
     return unfinalized;
   }
 }
+
+// Re-export durable witness implementation
+export * from "./durable-witness.js";

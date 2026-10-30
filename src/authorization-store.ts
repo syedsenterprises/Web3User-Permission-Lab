@@ -1,3 +1,4 @@
+import type { KeyObject } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import {
   type Clock,
@@ -11,6 +12,15 @@ import { SQLiteKeyStore } from "./key-store.js";
 import { SQLitePolicyStore } from "./policy-store.js";
 import { type BudgetWindowType } from "./policy.js";
 import { isFatalIOError, withImmediateTransaction } from "./sqlite-transaction.js";
+import {
+  canonicalWitnessReceiptPayload,
+  verifyWitnessReceipt,
+  type SignedWitnessReceipt,
+} from "./monotonic-witness.js";
+import {
+  parseEd25519PublicKey,
+  areEd25519PublicKeysEqual,
+} from "./authorization-crypto.js";
 
 export * from "./policy-store.js";
 export * from "./key-store.js";
@@ -40,6 +50,7 @@ export interface SQLiteAuthorizationStoreOptions {
   readonly synchronous?: SQLiteSynchronousMode;
   readonly onFatalTaint?: (reason: string) => void;
   readonly busyTimeoutMs?: number;
+  readonly witnessPublicKey?: string | KeyObject;
 }
 
 /**
@@ -82,6 +93,7 @@ export interface BoundAuthorizationIdStore extends AuthorizationIdStore {
 }
 
 export type AuthorizationState = "issued" | "consumed" | "legacy_void" | "cancelled";
+export type WitnessStatus = "NONE" | "PENDING_COMMIT" | "COMMITTED" | "DISPUTED";
 
 export interface AuthorizationRecord {
   readonly authorizationId: string;
@@ -91,6 +103,46 @@ export interface AuthorizationRecord {
   readonly artifactVersion: number;
   readonly keyId: string | null;
   readonly issuedAtSeconds: number | null;
+  readonly witnessTicketId?: string | null;
+  readonly witnessReceiptJson?: string | null;
+  readonly witnessStatus?: WitnessStatus;
+}
+
+export type UnreconciledWitnessStatus = "PENDING_COMMIT" | "DISPUTED";
+
+export interface ListUnreconciledWitnessRecordsOptions {
+  /**
+   * Filter by a specific unresolved witness status.
+   * If omitted, both 'PENDING_COMMIT' and 'DISPUTED' records are returned.
+   */
+  readonly status?: UnreconciledWitnessStatus;
+
+  /**
+   * Maximum number of records to return (1..1000, default: 100).
+   */
+  readonly limit?: number;
+}
+
+export interface UnreconciledWitnessRecord {
+  readonly authorizationId: string;
+  readonly bindingDigest: string;
+  readonly state: "consumed";
+  readonly witnessTicketId: string;
+  readonly witnessStatus: UnreconciledWitnessStatus;
+  readonly hasReceipt: boolean;
+  readonly consumedAt: string | null;
+}
+
+export interface PersistWitnessReceiptParams {
+  readonly authorizationId: string;
+  readonly ticketId: string;
+  readonly receiptJson: string;
+  /**
+   * When true, allows resolving an authorization record currently in 'DISPUTED' status
+   * to 'COMMITTED' if a valid, authentic receipt is provided.
+   * Defaults to false (only 'PENDING_COMMIT' is permitted).
+   */
+  readonly allowDisputed?: boolean;
 }
 
 /**
@@ -107,6 +159,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
   private tainted: boolean = false;
   private taintedReason: string | undefined;
   private readonly onFatalTaint?: (reason: string) => void;
+  private readonly witnessPublicKey?: KeyObject;
 
   constructor(
     databasePath: string,
@@ -121,6 +174,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     let resolvedSynchronous: SQLiteSynchronousMode = "FULL";
     let resolvedFatalTaint: ((reason: string) => void) | undefined;
     let resolvedBusyTimeout: number | undefined;
+    let resolvedWitnessPublicKey: string | KeyObject | undefined;
 
     if (options && typeof options === "object") {
       resolvedClock =
@@ -134,6 +188,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
       resolvedSynchronous = options.synchronous ?? "FULL";
       resolvedFatalTaint = options.onFatalTaint;
       resolvedBusyTimeout = options.busyTimeoutMs;
+      resolvedWitnessPublicKey = options.witnessPublicKey;
     } else if (clockOrOptions && "nowSeconds" in clockOrOptions) {
       resolvedClock = clockOrOptions;
       resolvedLegacy = false;
@@ -146,11 +201,20 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
       resolvedSynchronous = clockOrOptions.synchronous ?? "FULL";
       resolvedFatalTaint = clockOrOptions.onFatalTaint;
       resolvedBusyTimeout = clockOrOptions.busyTimeoutMs;
+      resolvedWitnessPublicKey = clockOrOptions.witnessPublicKey;
     }
 
     this.clock = resolvedClock;
     this.allowLegacyArtifactVersions = resolvedLegacy;
     this.onFatalTaint = resolvedFatalTaint;
+
+    if (resolvedWitnessPublicKey) {
+      const parsed = parseEd25519PublicKey(resolvedWitnessPublicKey);
+      if (!parsed) {
+        throw new Error("Configured witnessPublicKey is not a valid Ed25519 public key.");
+      }
+      this.witnessPublicKey = parsed;
+    }
 
     this.clockGuard =
       resolvedGuard ??
@@ -266,6 +330,23 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
       }
 
       if (
+        !tableNames.has("consumed_authorization_ids") &&
+        tableNames.has("consumed_authorization_ids_v4")
+      ) {
+        this.db.exec(
+          "ALTER TABLE consumed_authorization_ids_v4 RENAME TO consumed_authorization_ids;",
+        );
+        tableNames.delete("consumed_authorization_ids_v4");
+        tableNames.add("consumed_authorization_ids");
+      } else if (
+        tableNames.has("consumed_authorization_ids") &&
+        tableNames.has("consumed_authorization_ids_v4")
+      ) {
+        this.resolveMultiTableAmbiguityV4();
+        tableNames.delete("consumed_authorization_ids_v4");
+      }
+
+      if (
         !tableNames.has("policy_budget_accumulators") &&
         tableNames.has("policy_budget_accumulators_v2")
       ) {
@@ -291,8 +372,42 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
             consumed_at TEXT,
             artifact_version INTEGER NOT NULL DEFAULT 1,
             key_id TEXT,
-            issued_at_seconds INTEGER
+            issued_at_seconds INTEGER,
+            witness_ticket_id TEXT,
+            witness_receipt_json TEXT,
+            witness_status TEXT NOT NULL DEFAULT 'NONE'
+              CHECK (witness_status IN ('NONE', 'PENDING_COMMIT', 'COMMITTED', 'DISPUTED')),
+            CONSTRAINT chk_witness_integrity CHECK (
+              (
+                witness_status = 'NONE'
+                AND witness_ticket_id IS NULL
+                AND witness_receipt_json IS NULL
+              )
+              OR
+              (
+                state = 'consumed'
+                AND witness_status = 'PENDING_COMMIT'
+                AND witness_ticket_id IS NOT NULL
+                AND witness_receipt_json IS NULL
+              )
+              OR
+              (
+                state = 'consumed'
+                AND witness_status = 'COMMITTED'
+                AND witness_ticket_id IS NOT NULL
+                AND witness_receipt_json IS NOT NULL
+              )
+              OR
+              (
+                state = 'consumed'
+                AND witness_status = 'DISPUTED'
+                AND witness_ticket_id IS NOT NULL
+              )
+            )
           );
+
+          CREATE INDEX IF NOT EXISTS idx_consumed_auth_witness_status
+            ON consumed_authorization_ids (witness_status);
         `);
       } else {
         // 3. Inspect existing table structure under the transaction lock
@@ -308,16 +423,66 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
         const isFullyMigrated =
           colMap.has("key_id") &&
           colMap.has("issued_at_seconds") &&
+          colMap.has("witness_ticket_id") &&
+          colMap.has("witness_receipt_json") &&
+          colMap.has("witness_status") &&
+          tableSql.includes("chk_witness_integrity") &&
           tableSql.includes("legacy_void") &&
           colMap.get("consumed_at")?.notnull === 0;
 
         if (!isFullyMigrated) {
+          // Pre-validate existing rows to ensure they do not violate strict integrity
+          const rawRows = this.db.prepare(
+            "SELECT * FROM consumed_authorization_ids"
+          ).all() as Array<Record<string, unknown>>;
+
+          const invalidRows: Array<Record<string, unknown>> = [];
+          for (const r of rawRows) {
+            const authId = r.authorization_id;
+            const state = r.state;
+            const isAuthIdValid = typeof authId === "string" && authId.length > 0 && authId.length <= 128;
+            const isStateValid = state === undefined || state === null || ["issued", "consumed", "legacy_void", "cancelled"].includes(String(state));
+            const artifactVersion = r.artifact_version;
+            const isVersionValid = artifactVersion === undefined || artifactVersion === null || (typeof artifactVersion === "number" && Number.isSafeInteger(artifactVersion) && artifactVersion >= 1);
+
+            const wStatus = r.witness_status !== undefined && r.witness_status !== null ? String(r.witness_status) : "NONE";
+            const wTicket = r.witness_ticket_id;
+            const wReceipt = r.witness_receipt_json;
+            const effectiveState = state === "issued" && artifactVersion === 2 && (r.key_id === null || r.key_id === undefined || String(r.key_id).trim() === "")
+              ? "legacy_void"
+              : (state ? String(state) : "consumed");
+
+            let isWitnessIntegrityValid = false;
+            if (wStatus === "NONE" && !wTicket && !wReceipt) {
+              isWitnessIntegrityValid = true;
+            } else if (wStatus === "PENDING_COMMIT" && wTicket && !wReceipt && effectiveState === "consumed") {
+              isWitnessIntegrityValid = true;
+            } else if (wStatus === "COMMITTED" && wTicket && wReceipt && effectiveState === "consumed") {
+              isWitnessIntegrityValid = true;
+            } else if (wStatus === "DISPUTED" && wTicket && effectiveState === "consumed") {
+              isWitnessIntegrityValid = true;
+            }
+
+            if (!isAuthIdValid || !isStateValid || !isVersionValid || !isWitnessIntegrityValid) {
+              invalidRows.push(r);
+            }
+          }
+
+          if (invalidRows.length > 0) {
+            throw new Error(
+              `Cannot migrate consumed_authorization_ids: table contains ${invalidRows.length} malformed row(s) failing strict schema or witness integrity validation. Halting startup to prevent data corruption; manual database inspection required.`,
+            );
+          }
+
           const hasBindingDigest = colMap.has("binding_digest");
           const hasState = colMap.has("state");
           const hasConsumedAt = colMap.has("consumed_at");
           const hasArtifactVersion = colMap.has("artifact_version");
           const hasKeyId = colMap.has("key_id");
           const hasIssuedAt = colMap.has("issued_at_seconds");
+          const hasWitnessTicketId = colMap.has("witness_ticket_id");
+          const hasWitnessReceiptJson = colMap.has("witness_receipt_json");
+          const hasWitnessStatus = colMap.has("witness_status");
 
           const bindingExpr = hasBindingDigest ? "binding_digest" : "NULL";
           const stateExpr = `
@@ -333,6 +498,9 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
           const versionExpr = hasArtifactVersion ? "COALESCE(artifact_version, 1)" : "1";
           const keyIdExpr = hasKeyId ? "key_id" : "NULL";
           const issuedAtExpr = hasIssuedAt ? "issued_at_seconds" : "NULL";
+          const ticketIdExpr = hasWitnessTicketId ? "witness_ticket_id" : "NULL";
+          const receiptExpr = hasWitnessReceiptJson ? "witness_receipt_json" : "NULL";
+          const statusExpr = hasWitnessStatus ? "COALESCE(witness_status, 'NONE')" : "'NONE'";
 
           // Query any non-automatic indexes to preserve them
           const indexes = this.db.prepare(
@@ -340,7 +508,7 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
           ).all() as Array<{ name: string; sql: string }>;
 
           this.db.exec(`
-            CREATE TABLE consumed_authorization_ids_v3 (
+            CREATE TABLE consumed_authorization_ids_v4 (
               authorization_id TEXT PRIMARY KEY,
               binding_digest TEXT,
               state TEXT NOT NULL DEFAULT 'consumed'
@@ -348,17 +516,51 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
               consumed_at TEXT,
               artifact_version INTEGER NOT NULL DEFAULT 1,
               key_id TEXT,
-              issued_at_seconds INTEGER
+              issued_at_seconds INTEGER,
+              witness_ticket_id TEXT,
+              witness_receipt_json TEXT,
+              witness_status TEXT NOT NULL DEFAULT 'NONE'
+                CHECK (witness_status IN ('NONE', 'PENDING_COMMIT', 'COMMITTED', 'DISPUTED')),
+              CONSTRAINT chk_witness_integrity CHECK (
+                (
+                  witness_status = 'NONE'
+                  AND witness_ticket_id IS NULL
+                  AND witness_receipt_json IS NULL
+                )
+                OR
+                (
+                  state = 'consumed'
+                  AND witness_status = 'PENDING_COMMIT'
+                  AND witness_ticket_id IS NOT NULL
+                  AND witness_receipt_json IS NULL
+                )
+                OR
+                (
+                  state = 'consumed'
+                  AND witness_status = 'COMMITTED'
+                  AND witness_ticket_id IS NOT NULL
+                  AND witness_receipt_json IS NOT NULL
+                )
+                OR
+                (
+                  state = 'consumed'
+                  AND witness_status = 'DISPUTED'
+                  AND witness_ticket_id IS NOT NULL
+                )
+              )
             );
 
-            INSERT INTO consumed_authorization_ids_v3 (
+            INSERT INTO consumed_authorization_ids_v4 (
               authorization_id,
               binding_digest,
               state,
               consumed_at,
               artifact_version,
               key_id,
-              issued_at_seconds
+              issued_at_seconds,
+              witness_ticket_id,
+              witness_receipt_json,
+              witness_status
             )
             SELECT
               authorization_id,
@@ -367,11 +569,17 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
               ${consumedAtExpr},
               ${versionExpr},
               ${keyIdExpr},
-              ${issuedAtExpr}
+              ${issuedAtExpr},
+              ${ticketIdExpr},
+              ${receiptExpr},
+              ${statusExpr}
             FROM consumed_authorization_ids;
 
             DROP TABLE consumed_authorization_ids;
-            ALTER TABLE consumed_authorization_ids_v3 RENAME TO consumed_authorization_ids;
+            ALTER TABLE consumed_authorization_ids_v4 RENAME TO consumed_authorization_ids;
+
+            CREATE INDEX IF NOT EXISTS idx_consumed_auth_witness_status
+              ON consumed_authorization_ids (witness_status);
           `);
 
           for (const idx of indexes) {
@@ -480,6 +688,75 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
     }
 
     this.db.exec("DROP TABLE consumed_authorization_ids_v3;");
+  }
+
+  private resolveMultiTableAmbiguityV4(): void {
+    const v4Count = (
+      this.db.prepare(
+        "SELECT COUNT(*) AS c FROM consumed_authorization_ids_v4",
+      ).get() as { c: number }
+    ).c;
+
+    if (v4Count === 0) {
+      this.db.exec("DROP TABLE consumed_authorization_ids_v4;");
+      return;
+    }
+
+    const origCols = this.db.prepare(
+      "PRAGMA table_info(consumed_authorization_ids)",
+    ).all() as Array<{ name: string }>;
+    const v4Cols = this.db.prepare(
+      "PRAGMA table_info(consumed_authorization_ids_v4)",
+    ).all() as Array<{ name: string }>;
+
+    const origColNames = origCols.map((c) => c.name).sort();
+    const v4ColNames = v4Cols.map((c) => c.name).sort();
+
+    if (
+      origColNames.length !== v4ColNames.length ||
+      origColNames.some((col, idx) => col !== v4ColNames[idx])
+    ) {
+      throw new Error(
+        "Ambiguous migration state: both consumed_authorization_ids and consumed_authorization_ids_v4 exist with conflicting schemas. Halting to preserve data for investigation.",
+      );
+    }
+
+    const origCount = (
+      this.db.prepare(
+        "SELECT COUNT(*) AS c FROM consumed_authorization_ids",
+      ).get() as { c: number }
+    ).c;
+
+    if (origCount !== v4Count) {
+      throw new Error(
+        `Ambiguous migration state: both consumed_authorization_ids (${origCount} rows) and consumed_authorization_ids_v4 (${v4Count} rows) exist with different row counts. Halting to preserve data for investigation.`,
+      );
+    }
+
+    const selectCols = origCols.map((c) => c.name).join(", ");
+    const diff1 = (
+      this.db.prepare(`
+        SELECT ${selectCols} FROM consumed_authorization_ids
+        EXCEPT
+        SELECT ${selectCols} FROM consumed_authorization_ids_v4
+      `).all() as Array<unknown>
+    );
+
+    const diff2 = (
+      this.db.prepare(`
+        SELECT ${selectCols} FROM consumed_authorization_ids_v4
+        EXCEPT
+        SELECT ${selectCols} FROM consumed_authorization_ids
+      `).all() as Array<unknown>
+    );
+
+    if (diff1.length > 0 || diff2.length > 0) {
+      throw new Error(
+        "Ambiguous migration state: both consumed_authorization_ids and consumed_authorization_ids_v4 exist with conflicting row contents. Halting to preserve data for investigation.",
+      );
+    }
+
+    this.db.exec("DROP TABLE consumed_authorization_ids_v4;");
   }
 
   private resolveBudgetAccumulatorsAmbiguity(): void {
@@ -1307,6 +1584,9 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
         artifact_version: number;
         key_id: string | null;
         issued_at_seconds: number | null;
+        witness_ticket_id?: string | null;
+        witness_receipt_json?: string | null;
+        witness_status?: WitnessStatus;
       } | undefined;
 
       if (!row) return null;
@@ -1319,7 +1599,415 @@ export class SQLiteAuthorizationStore implements BoundAuthorizationIdStore {
         artifactVersion: row.artifact_version,
         keyId: row.key_id,
         issuedAtSeconds: row.issued_at_seconds,
+        witnessTicketId: row.witness_ticket_id ?? null,
+        witnessReceiptJson: row.witness_receipt_json ?? null,
+        witnessStatus: row.witness_status ?? "NONE",
       };
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
+  }
+
+  /**
+   * Persists a validated witness receipt and transitions the authorization row from
+   * PENDING_COMMIT to COMMITTED atomically under an exclusive SQLite write lock.
+   *
+   * NOTE on policyId and policyRevision binding:
+   * The `consumed_authorization_ids` table does not persist discrete `policy_id` or `policy_revision`
+   * columns. Authoritative policy binding is verified before persistence via:
+   * 1. Lifecycle pre-persistence identity check asserting `receipt.policyId === artifact.policyId`
+   *    and `receipt.policyRevision === artifact.policyRevision`.
+   * 2. Row `binding_digest` check: `binding_digest` is a SHA-256 hash that binds `policy.policyId`
+   *    and `policy.version`.
+   */
+  persistWitnessReceipt(
+    params: PersistWitnessReceiptParams,
+  ): { success: boolean; alreadyCommitted?: boolean; reason?: string } {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+
+    try {
+      return withImmediateTransaction(this.db, () => {
+        const row = this.db.prepare(
+          "SELECT state, witness_ticket_id, witness_receipt_json, witness_status, binding_digest FROM consumed_authorization_ids WHERE authorization_id = ?"
+        ).get(params.authorizationId) as {
+          state: string;
+          witness_ticket_id: string | null;
+          witness_receipt_json: string | null;
+          witness_status: string;
+          binding_digest: string | null;
+        } | undefined;
+
+        if (!row) {
+          return { success: false, reason: `Authorization '${params.authorizationId}' not found.` };
+        }
+
+        if (row.state !== "consumed") {
+          return {
+            success: false,
+            reason: `Authorization '${params.authorizationId}' is in state '${row.state}', expected 'consumed'.`,
+          };
+        }
+
+        if (row.witness_ticket_id !== params.ticketId) {
+          return {
+            success: false,
+            reason: `Ticket ID mismatch for authorization '${params.authorizationId}': expected '${params.ticketId}', found '${row.witness_ticket_id}'.`,
+          };
+        }
+
+        let parsed: any;
+        try {
+          parsed = JSON.parse(params.receiptJson);
+        } catch {
+          return { success: false, reason: "Receipt JSON is malformed." };
+        }
+
+        if (parsed?.authorizationId !== params.authorizationId || parsed?.ticketId !== params.ticketId) {
+          return { success: false, reason: "Receipt identity does not match authorization parameters." };
+        }
+
+        if (row.binding_digest !== null && parsed?.bindingDigest !== row.binding_digest) {
+          return { success: false, reason: "Receipt bindingDigest does not match stored authorization record." };
+        }
+
+        if (row.witness_status === "COMMITTED") {
+          if (row.witness_receipt_json === params.receiptJson) {
+            return { success: true, alreadyCommitted: true };
+          }
+          return {
+            success: false,
+            reason: `Conflicting receipt already persisted for committed authorization '${params.authorizationId}'.`,
+          };
+        }
+
+        if (
+          typeof parsed !== "object" ||
+          parsed === null ||
+          parsed.version !== 1 ||
+          typeof parsed.sequenceNumber !== "string"
+        ) {
+          return { success: false, reason: "Receipt structure is invalid." };
+        }
+
+        try {
+          canonicalWitnessReceiptPayload(parsed);
+        } catch {
+          return { success: false, reason: "Receipt payload structure is invalid." };
+        }
+
+        if (!this.witnessPublicKey || !verifyWitnessReceipt(this.witnessPublicKey, parsed)) {
+          return {
+            success: false,
+            reason: "Receipt signature verification failed against configured store trust anchor.",
+          };
+        }
+
+        const allowedPriorStatuses = params.allowDisputed
+          ? ["PENDING_COMMIT", "DISPUTED"]
+          : ["PENDING_COMMIT"];
+
+        if (!allowedPriorStatuses.includes(row.witness_status)) {
+          return {
+            success: false,
+            reason: `Invalid witness status '${row.witness_status}' for authorization '${params.authorizationId}': expected ${allowedPriorStatuses.map((s) => `'${s}'`).join(" or ")}.`,
+          };
+        }
+
+        const updateSql = params.allowDisputed
+          ? `UPDATE consumed_authorization_ids
+             SET witness_status = 'COMMITTED',
+                 witness_receipt_json = ?
+             WHERE authorization_id = ?
+               AND witness_ticket_id = ?
+               AND witness_status IN ('PENDING_COMMIT', 'DISPUTED')
+               AND state = 'consumed'`
+          : `UPDATE consumed_authorization_ids
+             SET witness_status = 'COMMITTED',
+                 witness_receipt_json = ?
+             WHERE authorization_id = ?
+               AND witness_ticket_id = ?
+               AND witness_status = 'PENDING_COMMIT'
+               AND state = 'consumed'`;
+
+        const updateRes = this.db.prepare(updateSql).run(
+          params.receiptJson,
+          params.authorizationId,
+          params.ticketId,
+        );
+
+        if (updateRes.changes !== 1) {
+          return {
+            success: false,
+            reason: `Expected 1 row updated for authorization '${params.authorizationId}', got ${updateRes.changes}.`,
+          };
+        }
+
+        return { success: true };
+      });
+    } catch (err) {
+      this.handleFatalIO(err);
+      return {
+        success: false,
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * Lists unresolved witness records requiring reconciliation.
+   * Returns records in 'PENDING_COMMIT' and 'DISPUTED' status in deterministic order.
+   *
+   * @param options Filtering by status ('PENDING_COMMIT' | 'DISPUTED') and maximum records limit (1..1000).
+   */
+  listUnreconciledWitnessRecords(
+    options?: ListUnreconciledWitnessRecordsOptions,
+  ): UnreconciledWitnessRecord[] {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+
+    if (options !== undefined && options !== null) {
+      if (typeof options !== "object") {
+        throw new Error("Options must be an object.");
+      }
+      if (
+        options.status !== undefined &&
+        options.status !== "PENDING_COMMIT" &&
+        options.status !== "DISPUTED"
+      ) {
+        throw new Error("Invalid status filter: expected 'PENDING_COMMIT' or 'DISPUTED'.");
+      }
+      if (options.limit !== undefined) {
+        if (
+          typeof options.limit !== "number" ||
+          !Number.isSafeInteger(options.limit) ||
+          options.limit < 1 ||
+          options.limit > 1000
+        ) {
+          throw new Error("Limit must be a positive integer between 1 and 1000.");
+        }
+      }
+    }
+
+    const limit = options?.limit ?? 100;
+    const statusFilter = options?.status;
+
+    try {
+      let rows: Array<{
+        authorization_id: string;
+        binding_digest: string | null;
+        state: string;
+        witness_ticket_id: string | null;
+        witness_status: string;
+        witness_receipt_json: string | null;
+        consumed_at: string | null;
+      }>;
+
+      if (statusFilter) {
+        rows = this.db.prepare(`
+          SELECT authorization_id, binding_digest, state, witness_ticket_id, witness_status, witness_receipt_json, consumed_at
+          FROM consumed_authorization_ids
+          WHERE state = 'consumed'
+            AND witness_status = ?
+          ORDER BY consumed_at ASC, authorization_id ASC
+          LIMIT ?
+        `).all(statusFilter, limit) as any;
+      } else {
+        rows = this.db.prepare(`
+          SELECT authorization_id, binding_digest, state, witness_ticket_id, witness_status, witness_receipt_json, consumed_at
+          FROM consumed_authorization_ids
+          WHERE state = 'consumed'
+            AND witness_status IN ('PENDING_COMMIT', 'DISPUTED')
+          ORDER BY consumed_at ASC, authorization_id ASC
+          LIMIT ?
+        `).all(limit) as any;
+      }
+
+      return rows.map((row) => {
+        if (
+          !row.authorization_id ||
+          !row.witness_ticket_id ||
+          !row.binding_digest ||
+          row.state !== "consumed" ||
+          (row.witness_status !== "PENDING_COMMIT" && row.witness_status !== "DISPUTED")
+        ) {
+          throw new Error(
+            `Malformed persisted witness record for authorization '${row.authorization_id}': integrity check failed.`,
+          );
+        }
+
+        return Object.freeze({
+          authorizationId: row.authorization_id,
+          bindingDigest: row.binding_digest,
+          state: "consumed" as const,
+          witnessTicketId: row.witness_ticket_id,
+          witnessStatus: row.witness_status as UnreconciledWitnessStatus,
+          hasReceipt: row.witness_receipt_json !== null,
+          consumedAt: row.consumed_at,
+        });
+      });
+    } catch (err) {
+      this.handleFatalIO(err);
+      throw err;
+    }
+  }
+
+  /**
+   * Marks a witness authorization record as DISPUTED when receipt verification fails
+   * or a conflicting receipt is presented, preserving evidence without releasing capacity.
+   */
+  markWitnessDisputed(params: {
+    authorizationId: string;
+    ticketId: string;
+    reason?: string;
+  }): boolean {
+    if (this.isTainted()) {
+      return false;
+    }
+    try {
+      return withImmediateTransaction(this.db, () => {
+        const updateRes = this.db.prepare(`
+          UPDATE consumed_authorization_ids
+          SET witness_status = 'DISPUTED'
+          WHERE authorization_id = ?
+            AND witness_ticket_id = ?
+            AND state = 'consumed'
+            AND witness_status != 'COMMITTED'
+        `).run(params.authorizationId, params.ticketId);
+        return updateRes.changes === 1;
+      });
+    } catch (err) {
+      this.handleFatalIO(err);
+      return false;
+    }
+  }
+
+  /**
+   * Retrieves a verified, immutable witness receipt for a consumed authorization.
+   * Returns null if the record does not exist, is not in COMMITTED state, has corrupted JSON,
+   * or fails cryptographic verification against the store's configured witness trust anchor.
+   *
+   * @param authorizationId Unique authorization identifier to look up.
+   * @param witnessPublicKey Optional public key override for backward compatibility.
+   *                         If supplied, it MUST match the store's configured trust anchor;
+   *                         otherwise, an Error is thrown to prevent trust-anchor override.
+   *
+   * NOTE on policyId and policyRevision binding:
+   * The `consumed_authorization_ids` table does not persist discrete `policy_id` or `policy_revision`
+   * columns. Authoritative policy binding is enforced transitively via:
+   * 1. Pre-persistence identity verification in authorization lifecycle prior to calling `persistWitnessReceipt()`.
+   * 2. Persisted `binding_digest` cross-check: `binding_digest` is a SHA-256 digest of canonical
+   *    binding data that explicitly encodes `policy.policyId` and `policy.version`.
+   * 3. Canonical cryptographic Ed25519 signature verification: `canonicalWitnessReceiptPayload()`
+   *    encodes both `policyId` and `policyRevision` into the signed receipt preimage.
+   */
+  getWitnessReceipt(
+    authorizationId: string,
+    witnessPublicKey?: string | KeyObject,
+  ): SignedWitnessReceipt | null {
+    if (this.isTainted()) {
+      throw new Error(
+        `SQLiteAuthorizationStore database connection is tainted and unusable: ${this.getTaintedReason()}`,
+      );
+    }
+
+    if (witnessPublicKey) {
+      if (!this.witnessPublicKey) {
+        throw new Error(
+          "Cannot supply per-call witnessPublicKey: no witness trust anchor is configured on SQLiteAuthorizationStore.",
+        );
+      }
+      if (!areEd25519PublicKeysEqual(witnessPublicKey, this.witnessPublicKey)) {
+        throw new Error(
+          "Supplied witnessPublicKey conflicts with configured store witness trust anchor.",
+        );
+      }
+    }
+
+    if (!this.witnessPublicKey) {
+      return null;
+    }
+
+    try {
+      const row = this.db.prepare(
+        "SELECT state, witness_ticket_id, witness_receipt_json, witness_status, binding_digest FROM consumed_authorization_ids WHERE authorization_id = ?"
+      ).get(authorizationId) as {
+        state: string;
+        witness_ticket_id: string | null;
+        witness_receipt_json: string | null;
+        witness_status: string;
+        binding_digest: string | null;
+      } | undefined;
+
+      if (!row) return null;
+      if (row.state !== "consumed" || row.witness_status !== "COMMITTED") {
+        return null;
+      }
+      if (!row.witness_ticket_id || !row.witness_receipt_json) {
+        return null;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.witness_receipt_json);
+      } catch {
+        return null; // Corrupted JSON
+      }
+
+      if (!parsed || typeof parsed !== "object") {
+        return null;
+      }
+
+      const receipt = parsed as SignedWitnessReceipt;
+      if (
+        receipt.version !== 1 ||
+        receipt.authorizationId !== authorizationId ||
+        receipt.ticketId !== row.witness_ticket_id ||
+        (row.binding_digest !== null && receipt.bindingDigest !== row.binding_digest)
+      ) {
+        return null;
+      }
+
+      try {
+        canonicalWitnessReceiptPayload(receipt);
+      } catch {
+        return null;
+      }
+
+      if (!verifyWitnessReceipt(this.witnessPublicKey, receipt)) {
+        return null;
+      }
+
+      return Object.freeze({
+        version: receipt.version,
+        witnessId: receipt.witnessId,
+        epochId: receipt.epochId,
+        sequenceNumber: receipt.sequenceNumber,
+        ticketId: receipt.ticketId,
+        authorizationId: receipt.authorizationId,
+        bindingDigest: receipt.bindingDigest,
+        policyId: receipt.policyId,
+        policyRevision: receipt.policyRevision,
+        debitedAmount: receipt.debitedAmount,
+        budgetWindows: Object.freeze(
+          (receipt.budgetWindows ?? []).map((w) =>
+            Object.freeze({
+              windowType: w.windowType,
+              windowStart: w.windowStart,
+              cumulativeSpentAfter: w.cumulativeSpentAfter,
+            }),
+          ),
+        ),
+        committedAtSeconds: receipt.committedAtSeconds,
+        signature: receipt.signature,
+      });
     } catch (err) {
       this.handleFatalIO(err);
       throw err;

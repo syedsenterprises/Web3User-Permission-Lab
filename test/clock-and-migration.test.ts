@@ -720,7 +720,18 @@ describe("Phase 1 Remediation: Ambiguous Migration Recovery & Atomic Discovery",
         expect(rows[1].authorization_id).toBe("idempotent-tombstone-002");
 
         const columns = (verifyDb.prepare("PRAGMA table_info(consumed_authorization_ids)").all() as Array<{ name: string }>).map((c) => c.name);
-        expect(columns).toEqual(["authorization_id", "binding_digest", "state", "consumed_at", "artifact_version", "key_id", "issued_at_seconds"]);
+        expect(columns).toEqual([
+          "authorization_id",
+          "binding_digest",
+          "state",
+          "consumed_at",
+          "artifact_version",
+          "key_id",
+          "issued_at_seconds",
+          "witness_ticket_id",
+          "witness_receipt_json",
+          "witness_status",
+        ]);
       } finally {
         verifyDb.close();
       }
