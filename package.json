@@ -42,11 +42,18 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^5.0.5"
   },
   "allowScripts": {
     "esbuild@0.28.2": true
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.7",
+    "@grpc/proto-loader": "^0.7.15",
+    "etcd3": "^1.1.2",
+    "pg": "^8.23.1"
   }
 }
