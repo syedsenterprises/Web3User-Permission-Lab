@@ -73,7 +73,7 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
       clientCert: certs.engineClientCert,
       clientKey: certs.engineClientKey,
       clientCertPem: certs.engineClientCert.toString("utf8"),
-      defaultTimeoutMs: 5000,
+      timeoutMs: 5000,
     });
   }, 45000);
 
@@ -98,6 +98,9 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
     const reserveRes = await store.reserveTicket({
       authorizationId: authId,
       bindingDigest,
+      policyId: "policy-lock-01",
+      policyRevision: 1,
+      idempotencyKey: `idem-${authId}`,
       budgetWindows: [],
     });
     expect(reserveRes.decision).toBe("ALLOW");
@@ -184,6 +187,9 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
       const res = await workerStore.reserveTicket({
         authorizationId: authId,
         bindingDigest: `sha256:digest-lock02-${i}`,
+        policyId: "policy-lock-02",
+        policyRevision: 1,
+        idempotencyKey: `idem-${authId}`,
         budgetWindows: [],
       });
       expect(res.decision).toBe("ALLOW");
@@ -197,7 +203,7 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
     const reconcilePromise = (async () => {
       while (!reconcileDone) {
         try {
-          await workerStore.reconcileSequenceGaps(epochId, 100);
+          await workerStore.reconcileSequenceGaps(epochId);
         } catch (e: any) {
           if (e.code === "40P01" || /deadlock/i.test(e.message)) {
             deadlockCount++;
@@ -227,6 +233,7 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
     const results = await Promise.allSettled(commitPromises);
     reconcileDone = true;
     await reconcilePromise;
+    await workerStore.reconcileSequenceGaps(epochId);
     await workerStore.close();
 
     // Invariant: ZERO deadlocks (40P01) occurred
@@ -247,6 +254,9 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
     const res = await client.reserveTicket({
       authorizationId: authId,
       bindingDigest,
+      policyId: "policy-lock-03",
+      policyRevision: 1,
+      idempotencyKey: `idem-${authId}`,
       leaseTtlSeconds: 300,
     });
     expect(res.decision).toBe("ALLOW");
@@ -294,6 +304,9 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
         const reserveRes = await client.reserveTicket({
           authorizationId: authId,
           bindingDigest: digest,
+          policyId: "policy-mixed",
+          policyRevision: 1,
+          idempotencyKey: `idem-${authId}`,
           budgetWindows: [
             {
               windowType,
@@ -335,6 +348,8 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
           // Odd indices: release ticket
           const releaseRes = await client.releaseTicket({
             ticketId,
+            authorizationId: authId,
+            bindingDigest: digest,
             reason: "Voluntary release in concurrency test",
           });
           expect(releaseRes.success).toBe(true);
@@ -377,8 +392,20 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
     const authId1 = `auth-lock05-rel-${Date.now()}`;
     const authId2 = `auth-lock05-quar-${Date.now()}`;
 
-    const t1 = await testStore.reserveTicket({ authorizationId: authId1, bindingDigest: "sha256:d1" });
-    const t2 = await testStore.reserveTicket({ authorizationId: authId2, bindingDigest: "sha256:d2" });
+    const t1 = await testStore.reserveTicket({
+      authorizationId: authId1,
+      bindingDigest: "sha256:d1",
+      policyId: "policy-lock-05",
+      policyRevision: 1,
+      idempotencyKey: `idem-${authId1}`,
+    });
+    const t2 = await testStore.reserveTicket({
+      authorizationId: authId2,
+      bindingDigest: "sha256:d2",
+      policyId: "policy-lock-05",
+      policyRevision: 1,
+      idempotencyKey: `idem-${authId2}`,
+    });
 
     // Block witness_epochs
     const blockerClient = await pool.connect();
@@ -392,9 +419,16 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
       let relDone = false;
       let quarDone = false;
 
-      const relPromise = testStore.releaseTicket({ ticketId: t1.ticketId!, authorizationId: authId1 }).then(() => {
-        relDone = true;
-      });
+      const relPromise = testStore
+        .releaseTicket({
+          ticketId: t1.ticketId!,
+          authorizationId: authId1,
+          bindingDigest: "sha256:d1",
+          reason: "Voluntary release in lock-05 test",
+        })
+        .then(() => {
+          relDone = true;
+        });
 
       const quarPromise = testStore.quarantineTicket(t2.ticketId!, "QUARANTINED_BLOCKED", "Test quarantine").then(() => {
         quarDone = true;

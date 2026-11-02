@@ -597,8 +597,8 @@ describe("Milestone 13-D Phase D3: Stage 2-A etcd Client Adapter Foundation", ()
         endpoints: ["https://127.0.0.1:2379"],
         credentials: {
           rootCertificate: certs.caCert,
-          certChain: certs.clientCert,
-          privateKey: certs.clientKey,
+          certChain: certs.engineClientCert,
+          privateKey: certs.engineClientKey,
         },
       });
 

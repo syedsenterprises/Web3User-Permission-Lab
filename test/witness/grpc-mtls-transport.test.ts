@@ -187,6 +187,9 @@ describe("Milestone 13-D Phase D2: Real TCP/mTLS 1.3 Transport Tests", () => {
         client.reserveTicket({
           authorizationId: "auth-recovery-attempt",
           bindingDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          policyId: "policy-test",
+          policyRevision: 1,
+          idempotencyKey: "idem-recovery-attempt",
         }),
       ).rejects.toThrow(/PERMISSION_DENIED/);
     } finally {

@@ -181,6 +181,8 @@ export class DisposableEtcdServer {
       name: "ServiceError",
       message,
       code,
+      details: message,
+      metadata: new grpc.Metadata(),
     };
   }
 

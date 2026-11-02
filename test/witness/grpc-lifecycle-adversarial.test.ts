@@ -97,6 +97,7 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
       bindingDigest,
       policyId: "policy-test",
       policyRevision: 1,
+      idempotencyKey: `idem-${authId}`,
       budgetWindows: [
         {
           windowType: "DAILY" as any,
@@ -122,8 +123,8 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const commitRes = await client.commitTicket(commitReq);
     expect(commitRes.decision).toBe("ALLOW");
     expect(commitRes.receipt).toBeDefined();
-    expect(commitRes.receipt.sequenceNumber).toBeDefined();
-    expect(commitRes.receipt.signature.length).toBe(128);
+    expect(commitRes.receipt!.sequenceNumber).toBeDefined();
+    expect(commitRes.receipt!.signature.length).toBe(128);
 
     const reconcileRes = await client.reconcileTicket({
       ticketId: reserveRes.ticketId!,
@@ -131,7 +132,7 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     });
     expect(reconcileRes.state).toBe("COMMITTED");
     expect(reconcileRes.receipt).toBeDefined();
-    expect(reconcileRes.receipt?.signature).toBe(commitRes.receipt.signature);
+    expect(reconcileRes.receipt?.signature).toBe(commitRes.receipt!.signature);
   });
 
   // ==========================================================================
@@ -145,6 +146,8 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const req1: WitnessReservationRequest = {
       authorizationId: authId,
       bindingDigest,
+      policyId: "policy-test",
+      policyRevision: 1,
       idempotencyKey,
     };
 
@@ -162,6 +165,8 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const reqMismatch: WitnessReservationRequest = {
       authorizationId: `auth-different-${Date.now()}`,
       bindingDigest,
+      policyId: "policy-test",
+      policyRevision: 1,
       idempotencyKey, // Reused key!
     };
 
@@ -178,6 +183,9 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const reserveRes = await client.reserveTicket({
       authorizationId: authId,
       bindingDigest,
+      policyId: "policy-test",
+      policyRevision: 1,
+      idempotencyKey: `idem-${authId}`,
       budgetWindows: [
         {
           windowType: "DAILY" as any,
@@ -306,6 +314,9 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const reserve11 = await client.reserveTicket({
       authorizationId: auth11,
       bindingDigest: "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      policyId: "policy-test",
+      policyRevision: 1,
+      idempotencyKey: `idem-${auth11}`,
     });
 
     const commit11 = await client.commitTicket({
@@ -334,7 +345,13 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const authId = `auth-norelease-${Date.now()}`;
     const bindingDigest = "sha256:6666666666666666666666666666666666666666666666666666666666666666";
 
-    const res = await client.reserveTicket({ authorizationId: authId, bindingDigest });
+    const res = await client.reserveTicket({
+      authorizationId: authId,
+      bindingDigest,
+      policyId: "policy-test",
+      policyRevision: 1,
+      idempotencyKey: `idem-${authId}`,
+    });
     await client.commitTicket({
       ticketId: res.ticketId!,
       authorizationId: authId,
@@ -421,6 +438,9 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const succReserve = await client.reserveTicket({
       authorizationId: succAuthId,
       bindingDigest: "sha256:succ-digest",
+      policyId: "policy-test",
+      policyRevision: 1,
+      idempotencyKey: `idem-${succAuthId}`,
     });
 
     // 3. Committing successor MUST fail closed with UNAVAILABLE because predecessor is actively leasing
@@ -452,7 +472,13 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const authId = `auth-inflight-${Date.now()}`;
     const bindingDigest = "sha256:inflight-digest";
 
-    const res = await client.reserveTicket({ authorizationId: authId, bindingDigest });
+    const res = await client.reserveTicket({
+      authorizationId: authId,
+      bindingDigest,
+      policyId: "policy-test",
+      policyRevision: 1,
+      idempotencyKey: `idem-${authId}`,
+    });
 
     // Transition ticket to COMMITTING_SIGNING_PENDING with an allocated sequence
     const sRes = await pool.query(`SELECT nextval(get_or_create_epoch_sequence($1)) AS seq`, [testEpochId]);
@@ -501,7 +527,13 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     const authId = `auth-conflict-${Date.now()}`;
     const bindingDigest = "sha256:original-digest";
 
-    const res = await client.reserveTicket({ authorizationId: authId, bindingDigest });
+    const res = await client.reserveTicket({
+      authorizationId: authId,
+      bindingDigest,
+      policyId: "policy-test",
+      policyRevision: 1,
+      idempotencyKey: `idem-${authId}`,
+    });
     const commitRes = await client.commitTicket({
       ticketId: res.ticketId!,
       authorizationId: authId,

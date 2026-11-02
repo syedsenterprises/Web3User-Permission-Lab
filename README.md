@@ -22,14 +22,36 @@ Development-stage preview and release candidate (`v0.1.0-rc.1`). This software i
 
 ## Requirements
 - Node.js 22.13.0 or later. The persistent SQLite store uses the built-in `node:sqlite` module, which was added in Node.js 22.5.0 and is available without an experimental flag starting in 22.13.0.
-- npm
+- npm (the repository baseline is npm 11.20.0).
+
+### Reproducible Development Setup
+
+The repository pins its baseline development runtime in `.nvmrc` (Node.js 26.11.1) and declares the baseline package manager in `package.json` (`npm@11.20.0`). These are the project's reproducible local baseline; the supported Node.js range remains `>=22.13.0`, as declared by the package and exercised by the CI compatibility matrix.
+
+With [nvm](https://github.com/nvm-sh/nvm) installed, select the pinned Node.js version with `nvm install` and `nvm use`. On Windows, use [nvm-windows](https://github.com/coreybutler/nvm-windows); run `nvm install 26.11.1` and `nvm use 26.11.1` because its command behavior differs from nvm on Unix-like systems. Confirm the active versions before installing dependencies:
+
+```bash
+node --version
+npm --version
+```
+
+From a fresh checkout, install exactly the dependency versions recorded in `package-lock.json`:
+
+```bash
+npm ci
+```
+
+Do not use `npm install` for a routine clean recovery install; use it only when intentionally changing dependencies and the lockfile.
 
 ## Run
+
 ```bash
-npm install
+npm run build
+npx tsc --noEmit
 npm test
 npx tsx examples/basic-authorization.ts
-npm run demo:persistent-replay
+npm run demo:persistent-replay -- --verify
+npm pack --dry-run --json
 ```
 
 ## Web3User Engine SDK Quickstart
