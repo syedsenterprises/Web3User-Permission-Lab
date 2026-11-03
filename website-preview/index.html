@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Web3User Permission Lab is a development-stage prototype exploring explicit, testable policy checks for Web3 transaction authorization.">
+<meta name="description" content="Web3User Permission Lab engineering status, roadmap, and architecture mindmap: M13-D development, 655 Linux-compatible tests, and open production-readiness gates.">
 <meta name="theme-color" content="#101a2c">
 <title>Web3User Permission Lab &mdash; Development Preview</title>
 <link rel="stylesheet" href="css/demo.css">
@@ -38,17 +38,18 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
 <body>
 <header class="wrap nav">
   <div class="brand">&#9672; Web3User Permission Lab</div>
-  <span class="pill">DEVELOPMENT PREVIEW &middot; v0.1.0-rc.1</span>
+  <span class="pill">ENGINEERING STATUS &middot; 03 NOV 2026</span>
 </header>
 <main class="wrap">
 <section class="hero">
   <div class="eyebrow">Explicit permissions for Web3 actions</div>
   <h1>Make transaction rules easier to inspect, test, and reason about.</h1>
-  <p>Web3User Permission Lab is an experimental, off-chain transaction authorization SDK for Node.js exploring how proposed blockchain actions can be checked against explicit, testable policies before execution. The current codebase is an in-process Node.js library supporting an ERC-20 transfer policy evaluator with cryptographic authorization binding and persistent SQLite replay protection&mdash;not a hosted API, cloud service, universal wallet, or production security product.</p>
+  <p>Web3User Permission Lab is an experimental, off-chain transaction authorization SDK for Node.js. Its implementation has advanced from the ERC-20 policy evaluator into persistent authorization governance, cumulative budgets, monotonic witness infrastructure, and a durable-witness / consensus development track. The current public site remains an informational static preview: it is not a hosted authorization API, production wallet, transaction broadcaster, or production security service.</p>
   <div class="actions">
     <a class="btn primary" href="#demo">Interactive Policy Playground</a>
-    <a class="btn" href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Read the white paper (PDF v0.3.0)</a>
-    <a class="btn" href="assets/web3user-project-mindmap-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Open project mindmap (v0.3.0)</a>
+    <a class="btn" href="assets/web3user-engineering-roadmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer">Read current engineering roadmap</a>
+    <a class="btn" href="assets/web3user-project-mindmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer">Open current project mindmap</a>
+    <a class="btn" href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Read historical white paper (v0.3.0)</a>
   </div>
 </section>
 
@@ -59,36 +60,36 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
 <section>
   <div class="checkpoint-box">
     <div class="checkpoint-header">
-      <div class="checkpoint-title">Current Release Candidate: v0.1.0-rc.1 &mdash; Off-Chain Authorization SDK</div>
-      <span class="checkpoint-tag">v0.1.0-rc.1 VERIFIED</span>
+      <div class="checkpoint-title">Current Engineering Snapshot &mdash; Milestone 13-D / DR-2B</div>
+      <span class="checkpoint-tag">DEVELOPMENT BRANCH · NOT A STABLE RELEASE</span>
     </div>
     <div class="checkpoint-grid">
       <div class="stat-item">
-        <div class="stat-label">Verified Commit (main)</div>
-        <div class="stat-code">30a4890b16a1e1e8c33c8efe03d7edd28e7806ae</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">test: increase Vitest timeouts for CI stability</div>
+        <div class="stat-label">Development Branch HEAD</div>
+        <div class="stat-code">25bfe62fbb1542e2f8512f522f9c8e4892b4ad97</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">feature/m13-d-consensus · pushed to origin</div>
       </div>
       <div class="stat-item">
-        <div class="stat-label">Release Candidate Tag</div>
-        <div class="stat-code">v0.1.0-rc.1 (ea52832)</div>
-        <div style="font-size:0.8rem;color:var(--gold);margin-top:2px;">Tagged commit: ea528326d514e46f1c93ab9d3f4c762b4e073730</div>
+        <div class="stat-label">Public Release Tag</div>
+        <div class="stat-code">v0.1.0-rc.1</div>
+        <div style="font-size:0.8rem;color:var(--gold);margin-top:2px;">Historical release candidate; not the current development HEAD</div>
       </div>
       <div class="stat-item">
-        <div class="stat-label">Hosted CI Matrix Result</div>
-        <div class="stat-val" style="color:var(--green);">332/332 passed (17 test files)</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">GitHub Actions run 40220716038 across Node.js 22, 24, and 26</div>
+        <div class="stat-label">Linux Compose Verification</div>
+        <div class="stat-val" style="color:var(--green);">655/655 passed · 32 files</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Local isolated PostgreSQL harness · 26 Windows real-etcd tests excluded</div>
       </div>
       <div class="stat-item">
-        <div class="stat-label">Persistent Replay Protection</div>
-        <div class="stat-val" style="color:var(--cyan);">Verified via SQLite WAL store</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Step 1: ALLOW on fresh DB &middot; Step 2: DENY on replay</div>
+        <div class="stat-label">Source Protection</div>
+        <div class="stat-val" style="color:var(--cyan);">Phase 1-A committed and pushed</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Exactly five approved deployment / verification files; local and remote synced</div>
       </div>
     </div>
   </div>
 </section>
 
 <section>
-  <h2>Milestone 6 Security &amp; Durability Invariants Implemented</h2>
+  <h2>Implemented Security &amp; Durability Foundation</h2>
   <div class="grid">
     <article class="card">
       <h3>Multi-Process Race &amp; Replay Prevention</h3>
@@ -114,80 +115,120 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
       <h3>Process-Crash Recovery (WAL Journaling)</h3>
       <p>Abrupt child worker termination during active uncommitted write transactions confirms automatic SQLite WAL rollback upon reopen. <em>Note: Qualified strictly as process-crash recovery testing, not physical power-loss durability.</em></p>
     </article>
+    <article class="card">
+      <h3>Durable Witness &amp; Reconciliation</h3>
+      <p>Milestones 11 through 13-C.1 establish the monotonic witness adapter, bounded reconciliation pipeline, and durable witness lifecycle integration in Git history.</p>
+    </article>
+    <article class="card">
+      <h3>Consensus Development Track</h3>
+      <p>The M13-D durable-witness / consensus foundation is committed on the development branch. Real-etcd integration remains a separately gated validation stage.</p>
+    </article>
+    <article class="card">
+      <h3>Reproducible Container Verification</h3>
+      <p>The accepted Linux Compose harness passed 655 tests across 32 files. The 26 Windows real-etcd tests were excluded and require separate native validation.</p>
+    </article>
   </div>
 </section>
 
 <section>
-  <h2>Implemented Prototype Scope vs. Future Work</h2>
+  <h2>Current Architecture: Implemented vs. Not Yet Production-Ready</h2>
   <div class="grid">
     <article class="card">
-      <h3>Implemented in Prototype</h3>
-      <p>&bull; ERC-20 <code>transfer(address,uint256)</code> policy evaluator.<br>
-      &bull; Exact canonical binding digests (calldata, recipient, amount, chain ID, sender).<br>
-      &bull; Ed25519 V3 signed authorization artifacts with length-prefixed encoding.<br>
-      &bull; Monotonic policy revisions &amp; key registry governance in SQLite.<br>
-      &bull; Persistent two-phase replay protection (<code>issued</code> &rarr; <code>consumed</code>).</p>
+      <h3>Implemented / Committed Foundation</h3>
+      <p>&bull; ERC-20 evaluator, canonical binding, Ed25519 V3 authorization artifacts.<br>
+      &bull; SQLite WAL persistence, single-use replay protection, policy/key governance, cumulative budgets.<br>
+      &bull; Monotonic clock and witness lifecycle, fail-closed recovery, bounded reconciliation pipeline.<br>
+      &bull; Milestones M0–M13-C.1 in Git history; M13-D durable-witness / consensus foundation committed on the development branch.<br>
+      &bull; DR-2B isolated Linux Compose harness accepted; 655/655 Linux-compatible tests passed.</p>
     </article>
     <article class="card">
-      <h3>Planned for Future Milestones</h3>
-      <p>&bull; Universal wallet integration &amp; RPC middleware adapters.<br>
-      &bull; Cumulative multi-transaction spending budgets over time windows.<br>
-      &bull; Arbitrary smart contract function call decoders.<br>
-      &bull; Multi-party threshold key signing and on-chain validator bindings.<br>
-      &bull; Formal external third-party security audits.</p>
+      <h3>Open Production Gates</h3>
+      <p>&bull; Revocation freshness worker and synchronization validation.<br>
+      &bull; Canonical receipt preimage compatibility across gRPC and Engine.<br>
+      &bull; AWS KMS Witness Signer adapter and contract tests.<br>
+      &bull; Air-gapped backup-key ceremony and cross-store restore validation.<br>
+      &bull; RPO/RTO restore drills and independent security audit.</p>
     </article>
   </div>
 </section>
 
 <section>
-  <h2>Development Roadmap</h2>
+  <h2>Development Roadmap &mdash; Updated 03 November 2026</h2>
   <div class="roadmap">
     <div class="milestone">
-      <div class="id">M0&ndash;M3</div>
-      <div><strong>Core Foundation, Policy Evaluator, &amp; Initial Tests</strong><p>Evaluator logic, calldata decoding, parameter boundary checks, and test harnesses.</p></div>
+      <div class="id">M0&ndash;M8</div>
+      <div><strong>Policy Engine, Cryptographic Authorization, Persistence &amp; Budgets</strong><p>ERC-20 evaluation, canonical binding, Ed25519 V3 artifacts, SQLite WAL replay protection, governance, cumulative budgets, and hardening.</p></div>
+      <span class="status">IMPLEMENTED</span>
+    </div>
+    <div class="milestone">
+      <div class="id">M9&ndash;M10</div>
+      <div><strong>Adversarial Security &amp; Disaster-Recovery Hardening</strong><p>Budget hardening, lock-hold optimization, adversarial concurrency, and recovery design work represented in milestone history.</p></div>
+      <span class="status">COMMITTED</span>
+    </div>
+    <div class="milestone">
+      <div class="id">M11</div>
+      <div><strong>Monotonic Witness Adapter &amp; Fail-Closed Recovery</strong><p>Monotonic witness adapter and fail-closed recovery foundation.</p></div>
+      <span class="status">COMMITTED</span>
+    </div>
+    <div class="milestone">
+      <div class="id">M12 / 13-B</div>
+      <div><strong>Durable Witness &amp; Bounded Reconciliation Pipeline</strong><p>Durable monotonic witness and bounded reconciliation pipeline.</p></div>
+      <span class="status">COMMITTED</span>
+    </div>
+    <div class="milestone">
+      <div class="id">M13-C / C.1</div>
+      <div><strong>Durable Witness Lifecycle &amp; Startup Synchronization Remediation</strong><p>Integrated lifecycle and startup synchronization vulnerability remediation on main.</p></div>
+      <span class="status">MAIN</span>
+    </div>
+    <div class="milestone">
+      <div class="id">M13-D</div>
+      <div><strong>Durable Witness / Consensus Foundation</strong><p>Foundation committed on feature/m13-d-consensus. The real-etcd integration harness is a separate validation stage and is not accepted yet.</p></div>
+      <span class="status current">IN PROGRESS</span>
+    </div>
+    <div class="milestone">
+      <div class="id">DR-2B</div>
+      <div><strong>Reproducible Non-Root Docker &amp; Compose Verification</strong><p>32 Linux-compatible test files and 655 tests passed in an isolated PostgreSQL Compose harness. The 26 Windows real-etcd tests were excluded.</p></div>
+      <span class="status">ACCEPTED</span>
+    </div>
+    <div class="milestone">
+      <div class="id">Phase 1-A</div>
+      <div><strong>Source Protection</strong><p>Exactly five approved Docker / CI / documentation files committed and pushed as 25bfe62; protected local data was excluded.</p></div>
       <span class="status">COMPLETE</span>
     </div>
     <div class="milestone">
-      <div class="id">M4&ndash;M5</div>
-      <div><strong>Canonical Transaction Binding &amp; Persistent Replay Protection</strong><p>Deterministic length-prefixed payload binding and SQLite two-phase state storage.</p></div>
-      <span class="status">COMPLETE</span>
-    </div>
-    <div class="milestone">
-      <div class="id">M6.1&ndash;M6.3</div>
-      <div><strong>V3 Ed25519 Signing, Monotonic Revisions, &amp; Safe Migrations</strong><p>Asymmetric artifact signing, authoritative policy revisions, and crash-safe schema evolution.</p></div>
-      <span class="status">COMPLETE</span>
-    </div>
-    <div class="milestone">
-      <div class="id">M6.4</div>
-      <div><strong>Post-Commit Security &amp; Crash-Recovery Validation</strong><p>Multi-process race barriers, transaction rollback failure injection, safe TTL arithmetic, and process-crash recovery.</p></div>
-      <span class="status">COMPLETE</span>
-    </div>
-    <div class="milestone">
-      <div class="id">v0.1.0-rc.1</div>
-      <div><strong>Release Candidate 1 &amp; Hosted CI Verification</strong><p>Release candidate packaging, full multi-version CI matrix passing across Node.js 22, 24, and 26 (332/332 tests), and pre-release security review.</p></div>
-      <span class="status current">CURRENT RC</span>
-    </div>
-    <div class="milestone">
-      <div class="id">M7</div>
-      <div><strong>Interactive Policy Playground &amp; Parity Test Suite</strong><p>Zero-dependency client-side evaluator with representative presets and parity verification against core SDK.</p></div>
-      <span class="status">COMPLETE</span>
-    </div>
-    <div class="milestone">
-      <div class="id">M8</div>
-      <div><strong>Stateful Cumulative Budget Enforcement</strong><p>Atomic hourly/daily cumulative budget caps enforced within SQLite write transactions with carry-forward across revisions.</p></div>
-      <span class="status current">CURRENT</span>
-    </div>
-    <div class="milestone">
-      <div class="id">M9</div>
-      <div><strong>External Wallet Boundaries &amp; Independent Security Review</strong><p>Universal wallet enforcement boundaries, adversarial fault injection, and formal third-party audit.</p></div>
-      <span class="status planned">PLANNED</span>
+      <div class="id">NEXT</div>
+      <div><strong>Production Readiness Gates</strong><p>Revocation freshness, receipt preimage compatibility, KMS signer, air-gapped backup keys, cross-store restore, measured RPO/RTO, and independent audit.</p></div>
+      <span class="status planned">BLOCKED</span>
     </div>
   </div>
+</section>
+
+<section>
+  <h2>Production Readiness — Open Blockers</h2>
+  <div class="grid">
+    <article class="card">
+      <h3>Revocation Freshness</h3>
+      <p>The 30-second fail-closed freshness gate still needs reliable background synchronization and integration validation.</p>
+    </article>
+    <article class="card">
+      <h3>Receipt Canonicalization</h3>
+      <p>gRPC and Engine currently use incompatible signing-preimage formats. A shared canonical format and verification tests are required.</p>
+    </article>
+    <article class="card">
+      <h3>Hardware-Backed Signing</h3>
+      <p>The AWS KMS Witness Signer adapter and its algorithm / encoding contract tests remain outstanding.</p>
+    </article>
+    <article class="card">
+      <h3>Offline Recovery &amp; Restore</h3>
+      <p>Air-gapped backup-key custody, cross-store PostgreSQL / etcd / SQLite recovery, and measured RPO/RTO drills are not complete.</p>
+    </article>
+  </div>
+  <p class="muted">The current PostgreSQL-backed witness path remains the live authority / single point of failure. Do not interpret the committed consensus foundation as proof that etcd is already the live authorization path. No independent commercial security audit has been completed.</p>
 </section>
 
 <section class="demo-section" id="demo">
   <div class="demo-header">
-    <div class="eyebrow">Interactive Demonstration &middot; Milestone 7 &amp; 8</div>
+    <div class="eyebrow">Interactive Demonstration &middot; Client-Side Policy Evaluator</div>
     <h2>Interactive Policy Evaluator Playground</h2>
     <p>Test real-time off-chain authorization decisions against custom policies and transaction requests. The evaluation logic below executes natively in your browser using pure TypeScript/JavaScript equivalent to <code>src/policy.ts</code>.</p>
   </div>
@@ -343,15 +384,17 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
 <section>
   <h2>Project Documents</h2>
   <ul>
-    <li><a href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer"><strong>Technical white paper &mdash; v0.3.0 (PDF)</strong></a> &mdash; Milestone 6.4 Validation Draft (23 October 2026)</li>
-    <li><a href="assets/web3user-project-mindmap-v0.3.0.pdf" target="_blank" rel="noopener noreferrer"><strong>Detailed project mindmap &mdash; v0.3.0 (PDF)</strong></a> &mdash; Milestone 6.4 Checkpoint</li>
-    <li><a href="assets/web3user-whitepaper-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Technical white paper &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft (22 October 2026)</li>
-    <li><a href="assets/web3user-project-mindmap-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Detailed project mindmap &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft</li>
+    <li><a href="assets/web3user-engineering-roadmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer"><strong>Engineering status &amp; roadmap (PDF)</strong></a> &mdash; Updated 03 November 2026</li>
+    <li><a href="assets/web3user-project-mindmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer"><strong>System mindmap &amp; architectural tree (PDF)</strong></a> &mdash; Updated 03 November 2026</li>
+    <li><a href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Technical white paper &mdash; v0.3.0 (PDF)</a> &mdash; Historical Milestone 6.4 draft (23 October 2026)</li>
+    <li><a href="assets/web3user-project-mindmap-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Project mindmap &mdash; v0.3.0 (PDF)</a> &mdash; Historical Milestone 6.4 checkpoint</li>
+    <li><a href="assets/web3user-whitepaper-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Technical white paper &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft</li>
+    <li><a href="assets/web3user-project-mindmap-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Project mindmap &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft</li>
   </ul>
 </section>
 </main>
 <footer>
-  <div class="wrap">Web3User Permission Lab &middot; Development Preview (v0.1.0-rc.1) &middot; This site is informational and does not provide financial, legal, or security guarantees.</div>
+  <div class="wrap">Web3User Permission Lab &middot; Engineering Status Snapshot: 03 November 2026 &middot; Historical public tag: v0.1.0-rc.1 &middot; Informational preview only; not a production authorization service.</div>
 </footer>
 <script type="module">
   import { initDemo } from "./js/demo-ui.js";

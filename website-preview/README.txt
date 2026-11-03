@@ -1,13 +1,21 @@
-Web3User Permission Lab — static development preview
+Web3User Permission Lab — Cloudflare Static Information Preview
+Status snapshot: 03 November 2026
 
-Contents:
-- index.html: responsive landing page with development disclaimer, milestone metrics, and roadmap
-- assets/web3user-whitepaper-v0.3.0.pdf: technical white paper (v0.3.0 · Milestone 6.4 Local Validation Draft)
-- assets/web3user-project-mindmap-v0.3.0.pdf: project mindmap (v0.3.0 · Milestone 6.4 Visual Summary)
-- assets/web3user-whitepaper-v0.2.0.pdf: historical technical white paper (v0.2.0 archival snapshot)
-- assets/web3user-project-mindmap-v0.2.0.pdf: historical project mindmap (v0.2.0 archival snapshot)
+This directory is the static public information site deployed through the Cloudflare Worker super-tree-7537 on web3user.tech and docs.web3user.tech. It is not the hosted authorization engine, PostgreSQL witness service, or production consensus path.
 
-This is a static website bundle. It has not been deployed and does not change web3user.tech DNS.
-Recommended: review the content, deploy to a free provider-generated preview URL, and only attach web3user.tech after explicit approval and DNS review.
+Current documents:
+- assets/web3user-engineering-roadmap-2026-11-03.pdf
+- assets/web3user-project-mindmap-2026-11-03.pdf
+- Historical reference: assets/web3user-whitepaper-v0.3.0.pdf and assets/web3user-project-mindmap-v0.3.0.pdf
 
-No backend, database, wallet connection, analytics, or secrets are included.
+Current development branch: feature/m13-d-consensus
+Development HEAD: 25bfe62fbb1542e2f8512f522f9c8e4892b4ad97
+Public release tag: v0.1.0-rc.1 (historical; not the current development HEAD)
+
+Latest accepted verification: Docker Compose Linux-compatible test run, 32 files / 655 tests passed. The 26 Windows real-etcd tests were excluded and require separate native validation. Phase 1-A source-protection commit 25bfe62 was pushed with exactly five approved files.
+
+Production blockers remain: revocation freshness synchronization, receipt preimage compatibility, AWS KMS Witness Signer adapter, air-gapped backup-key ceremony, cross-store recovery validation, measured RPO/RTO, and independent security audit.
+
+The Compose test network has no published PostgreSQL host port, but outbound network access remains enabled; it is not air-gapped. Do not describe this harness as production isolation.
+
+No secrets, .tmp/ binaries/fixtures, or .demo-data/ SQLite files are part of this website bundle.
