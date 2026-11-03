@@ -1,0 +1,50 @@
+# Web3User Permission Lab - Milestone 13-D DR-2B Docker Compose Verification
+# Runs an ephemeral PostgreSQL service and verification test runner.
+# The Compose PostgreSQL service publishes no host ports.
+# The absence of published host ports prevents host-port binding collisions,
+# but does not guarantee network isolation from host services.
+# Uses Compose project-scoped container naming (<project>-<service>-<index>).
+# Independent concurrent runs on the same Docker daemon require distinct project names,
+# for example: docker compose -p <project-name> ...
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: web3user_witness_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d web3user_witness_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    labels:
+      com.syedsenterprises.project: "web3user-dr2b"
+      com.syedsenterprises.purpose: "temporary-test"
+
+  tester:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: web3user_witness_test
+    command: >
+      sh -c '
+        npx vitest run --exclude "**/*.real.test.ts" &&
+        npx tsx examples/basic-authorization.ts &&
+        npm run demo:persistent-replay -- --verify &&
+        npm pack --dry-run --json
+      '
+    labels:
+      com.syedsenterprises.project: "web3user-dr2b"
+      com.syedsenterprises.purpose: "temporary-test"
