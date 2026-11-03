@@ -19,7 +19,11 @@ import { startGrpcWitnessServer, type StartedGrpcWitnessServer } from "../../src
 import { RemoteDurableWitnessClient } from "../../src/witness/remote-witness-client.js";
 import { LocalEd25519WitnessSigner } from "../../src/witness/signing.js";
 import { PostgresWitnessStore } from "../../src/witness/postgres-store.js";
-import type { WitnessReservationRequest, WitnessCommitRequest } from "../../src/monotonic-witness.js";
+import {
+  verifyWitnessReceipt,
+  type WitnessReservationRequest,
+  type WitnessCommitRequest,
+} from "../../src/monotonic-witness.js";
 
 const { Pool } = pg;
 
@@ -31,6 +35,7 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
   let serverInstance: StartedGrpcWitnessServer;
   let serverEndpoint: string;
   let client: RemoteDurableWitnessClient;
+  let signer: LocalEd25519WitnessSigner;
   const testEpochId = `test-adversarial-epoch-${Date.now()}`;
 
   let testEpochHeight: number;
@@ -45,7 +50,7 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     testEpochHeight = Number(maxHRes.rows[0].next_h);
     await store.registerEpoch(testEpochId, testEpochHeight);
 
-    const signer = new LocalEd25519WitnessSigner("adversarial-witness-signer");
+    signer = new LocalEd25519WitnessSigner("adversarial-witness-signer");
     serviceImpl = new GrpcWitnessServiceImpl({ pool, signer });
 
     serverInstance = await startGrpcWitnessServer({
@@ -126,6 +131,10 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     expect(commitRes.receipt!.sequenceNumber).toBeDefined();
     expect(commitRes.receipt!.signature.length).toBe(128);
 
+    // Cryptographic verification of gRPC receipt using witness public key
+    expect(verifyWitnessReceipt(signer.getPublicKeyHex(), commitRes.receipt!)).toBe(true);
+    expect(verifyWitnessReceipt(signer.getPublicKeyPem(), commitRes.receipt!)).toBe(true);
+
     const reconcileRes = await client.reconcileTicket({
       ticketId: reserveRes.ticketId!,
       authorizationId: authId,
@@ -133,6 +142,14 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
     expect(reconcileRes.state).toBe("COMMITTED");
     expect(reconcileRes.receipt).toBeDefined();
     expect(reconcileRes.receipt?.signature).toBe(commitRes.receipt!.signature);
+
+    // Cryptographic verification of reconciled receipt
+    expect(verifyWitnessReceipt(signer.getPublicKeyHex(), reconcileRes.receipt!)).toBe(true);
+    expect(verifyWitnessReceipt(signer.getPublicKeyPem(), reconcileRes.receipt!)).toBe(true);
+
+    // Tamper detection: modifying debitedAmount or sequenceNumber must fail verification
+    expect(verifyWitnessReceipt(signer.getPublicKeyHex(), { ...commitRes.receipt!, debitedAmount: "999" })).toBe(false);
+    expect(verifyWitnessReceipt(signer.getPublicKeyHex(), { ...commitRes.receipt!, sequenceNumber: "99999" })).toBe(false);
   });
 
   // ==========================================================================
@@ -435,9 +452,10 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
 
     // 2. Now attempt to reserve and commit the successor sequence
     const succAuthId = `auth-succ-${Date.now()}`;
+    const succDigest = "sha256:" + "7".repeat(64);
     const succReserve = await client.reserveTicket({
       authorizationId: succAuthId,
-      bindingDigest: "sha256:succ-digest",
+      bindingDigest: succDigest,
       policyId: "policy-test",
       policyRevision: 1,
       idempotencyKey: `idem-${succAuthId}`,
@@ -448,7 +466,7 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
       client.commitTicket({
         ticketId: succReserve.ticketId!,
         authorizationId: succAuthId,
-        bindingDigest: "sha256:succ-digest",
+        bindingDigest: succDigest,
         localCommittedAtSeconds: Math.floor(Date.now() / 1000),
       }),
     ).rejects.toThrow(/UNAVAILABLE/);
@@ -470,7 +488,7 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
   // ==========================================================================
   it("COR-D2-02: In-flight duplicate commit does not allocate a second sequence number", async () => {
     const authId = `auth-inflight-${Date.now()}`;
-    const bindingDigest = "sha256:inflight-digest";
+    const bindingDigest = "sha256:" + "8".repeat(64);
 
     const res = await client.reserveTicket({
       authorizationId: authId,
@@ -525,7 +543,7 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
   // ==========================================================================
   it("IDEM-D2-01: Replaying commit on an already committed ticket with conflicting payload returns ALREADY_EXISTS / 409 Conflict", async () => {
     const authId = `auth-conflict-${Date.now()}`;
-    const bindingDigest = "sha256:original-digest";
+    const bindingDigest = "sha256:" + "9".repeat(64);
 
     const res = await client.reserveTicket({
       authorizationId: authId,
@@ -557,7 +575,7 @@ describe("Milestone 13-D Phase D2: Distributed Lifecycle & Adversarial Tests", (
       client.commitTicket({
         ticketId: res.ticketId!,
         authorizationId: authId,
-        bindingDigest: "sha256:TAMPERED-DIFFERENT-DIGEST",
+        bindingDigest: "sha256:" + "f".repeat(64),
         localCommittedAtSeconds: Math.floor(Date.now() / 1000),
       }),
     ).rejects.toThrow(/ALREADY_EXISTS/);

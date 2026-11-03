@@ -29,6 +29,7 @@ import {
   WitnessUnavailableError,
   WitnessStorageError,
 } from "./postgres-store.js";
+import { normalizeBudgetWindowType } from "./signing.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,17 +42,20 @@ export interface RemoteWitnessClientOptions {
   clientCertPem?: string; // Optional raw PEM string attached via metadata
   serverNameOverride?: string;
   timeoutMs?: number;
+  publicKeyPem?: string;
 }
 
 export class RemoteDurableWitnessClient implements MonotonicWitnessAdapter {
   readonly name = "RemoteDurableWitnessClient";
   readonly isTestOnlyMock = false;
+  readonly publicKeyPem?: string;
 
   private client: any;
   private clientCertPem?: string;
   private defaultTimeoutMs: number;
 
   constructor(options: RemoteWitnessClientOptions) {
+    this.publicKeyPem = options.publicKeyPem;
     this.defaultTimeoutMs = options.timeoutMs || 5000;
     this.clientCertPem = options.clientCertPem || options.clientCert?.toString("utf8");
 
@@ -155,7 +159,7 @@ export class RemoteDurableWitnessClient implements MonotonicWitnessAdapter {
       policy_id: request.policyId,
       policy_revision: request.policyRevision,
       budget_windows: request.budgetWindows?.map((w) => ({
-        window_type: w.windowType,
+        window_type: w.windowType === "DAILY" ? 2 : 1,
         window_start_seconds: w.windowStart,
         requested_amount: w.requestedAmount,
         max_cumulative_amount: w.maxCumulativeAmount,
@@ -244,21 +248,21 @@ export class RemoteDurableWitnessClient implements MonotonicWitnessAdapter {
           if (resp.receipt) {
             receipt = {
               version: 1 as const,
-              witnessId: resp.receipt.witness_id,
-              epochId: resp.receipt.epoch_id,
-              sequenceNumber: resp.receipt.sequence_number,
-              ticketId: resp.receipt.ticket_id,
-              authorizationId: resp.receipt.authorization_id,
-              bindingDigest: resp.receipt.binding_digest,
-              policyId: resp.receipt.policy_id,
-              policyRevision: Number(resp.receipt.policy_revision),
-              debitedAmount: resp.receipt.debited_amount,
-              budgetWindows: (resp.receipt.budget_windows || []).map((bw: any) => ({
-                windowType: bw.window_type,
-                windowStart: Number(bw.window_start_seconds),
-                cumulativeSpentAfter: bw.cumulative_spent_after,
+              witnessId: resp.receipt.witness_id || resp.receipt.witnessId,
+              epochId: resp.receipt.epoch_id || resp.receipt.epochId,
+              sequenceNumber: String(resp.receipt.sequence_number || resp.receipt.sequenceNumber),
+              ticketId: resp.receipt.ticket_id || resp.receipt.ticketId,
+              authorizationId: resp.receipt.authorization_id || resp.receipt.authorizationId,
+              bindingDigest: resp.receipt.binding_digest || resp.receipt.bindingDigest,
+              policyId: resp.receipt.policy_id || resp.receipt.policyId || "default-policy",
+              policyRevision: Number(resp.receipt.policy_revision || resp.receipt.policyRevision || 1),
+              debitedAmount: String(resp.receipt.debited_amount ?? resp.receipt.debitedAmount ?? "0"),
+              budgetWindows: (resp.receipt.budget_windows || resp.receipt.budgetWindows || []).map((bw: any) => ({
+                windowType: normalizeBudgetWindowType(bw.window_type ?? bw.windowType),
+                windowStart: Number(bw.window_start_seconds ?? bw.windowStart ?? 0),
+                cumulativeSpentAfter: String(bw.cumulative_spent_after ?? bw.cumulativeSpentAfter ?? "0"),
               })),
-              committedAtSeconds: Number(resp.receipt.committed_at_seconds),
+              committedAtSeconds: Number(resp.receipt.committed_at_seconds ?? resp.receipt.committedAtSeconds ?? 0),
               signature: resp.receipt.signature,
             };
           }
@@ -328,21 +332,21 @@ export class RemoteDurableWitnessClient implements MonotonicWitnessAdapter {
           if (resp.receipt) {
             receipt = {
               version: 1 as const,
-              witnessId: resp.receipt.witness_id,
-              epochId: resp.receipt.epoch_id,
-              sequenceNumber: resp.receipt.sequence_number,
-              ticketId: resp.receipt.ticket_id,
-              authorizationId: resp.receipt.authorization_id,
-              bindingDigest: resp.receipt.binding_digest,
-              policyId: resp.receipt.policy_id,
-              policyRevision: Number(resp.receipt.policy_revision),
-              debitedAmount: resp.receipt.debited_amount,
-              budgetWindows: (resp.receipt.budget_windows || []).map((bw: any) => ({
-                windowType: bw.window_type,
-                windowStart: Number(bw.window_start_seconds),
-                cumulativeSpentAfter: bw.cumulative_spent_after,
+              witnessId: resp.receipt.witness_id || resp.receipt.witnessId,
+              epochId: resp.receipt.epoch_id || resp.receipt.epochId,
+              sequenceNumber: String(resp.receipt.sequence_number || resp.receipt.sequenceNumber),
+              ticketId: resp.receipt.ticket_id || resp.receipt.ticketId,
+              authorizationId: resp.receipt.authorization_id || resp.receipt.authorizationId,
+              bindingDigest: resp.receipt.binding_digest || resp.receipt.bindingDigest,
+              policyId: resp.receipt.policy_id || resp.receipt.policyId || "default-policy",
+              policyRevision: Number(resp.receipt.policy_revision || resp.receipt.policyRevision || 1),
+              debitedAmount: String(resp.receipt.debited_amount ?? resp.receipt.debitedAmount ?? "0"),
+              budgetWindows: (resp.receipt.budget_windows || resp.receipt.budgetWindows || []).map((bw: any) => ({
+                windowType: normalizeBudgetWindowType(bw.window_type ?? bw.windowType),
+                windowStart: Number(bw.window_start_seconds ?? bw.windowStart ?? 0),
+                cumulativeSpentAfter: String(bw.cumulative_spent_after ?? bw.cumulativeSpentAfter ?? "0"),
               })),
-              committedAtSeconds: Number(resp.receipt.committed_at_seconds),
+              committedAtSeconds: Number(resp.receipt.committed_at_seconds ?? resp.receipt.committedAtSeconds ?? 0),
               signature: resp.receipt.signature,
             };
           }

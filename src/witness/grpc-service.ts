@@ -13,7 +13,7 @@ import { IdempotencyFingerprinter } from "./idempotency.js";
 import { PeerAuthorizer, type AuthenticatedPeer } from "./auth.js";
 import { PostgresConnectionDisposalAdapter } from "./disposal-adapter.js";
 import type { WitnessSigner, ReceiptPreimageData } from "./signing.js";
-import { formatCanonicalPreimage } from "./signing.js";
+import { formatCanonicalPreimage, normalizeBudgetWindowType } from "./signing.js";
 import { PG_SQLSTATE } from "./postgres-store.js";
 
 export class StaleWorkerFencedError extends Error {
@@ -560,13 +560,49 @@ export class GrpcWitnessServiceImpl {
         }
       }
 
+      const resolvedPolicyId = ticket.policy_id || "default-policy";
+      const resolvedPolicyRevision = ticket.policy_revision ? Number(ticket.policy_revision) : 1;
+
+      let resolvedWindowType: string | number = 1;
+      let resolvedWindowStart = now;
+      let cumulativeSpentAfter = resolvedRequestedAmt;
+      if (resolvedWindowId) {
+        const accRes = await phase1Client.query(
+          `SELECT window_type, window_start, current_amount, held_amount FROM witness_accumulators WHERE window_id = $1`,
+          [resolvedWindowId],
+        );
+        if (accRes.rows.length > 0) {
+          resolvedWindowType = accRes.rows[0].window_type;
+          resolvedWindowStart = Number(accRes.rows[0].window_start);
+          cumulativeSpentAfter = (BigInt(accRes.rows[0].current_amount) + BigInt(resolvedRequestedAmt)).toString();
+        }
+      }
+
       const leaseExpiresAt = now + 15;
-      const preimageStub = JSON.stringify({
-        ticketId: req.ticket_id,
-        authId: req.authorization_id,
-        epochId,
-        seq: currentAllocatedSeq,
-      });
+      const preimageData: ReceiptPreimageData = {
+        version: 1,
+        witness_id: this.signer.getWitnessId(),
+        epoch_id: epochId,
+        sequence_number: currentAllocatedSeq,
+        ticket_id: req.ticket_id,
+        authorization_id: req.authorization_id,
+        binding_digest: req.binding_digest,
+        policy_id: resolvedPolicyId,
+        policy_revision: resolvedPolicyRevision,
+        debited_amount: resolvedRequestedAmt,
+        budget_windows: resolvedWindowId
+          ? [
+              {
+                window_type: resolvedWindowType,
+                window_start_seconds: resolvedWindowStart,
+                cumulative_spent_after: cumulativeSpentAfter,
+              },
+            ]
+          : [],
+        committed_at_seconds: now,
+      };
+
+      const canonicalPreimage = formatCanonicalPreimage(preimageData);
 
       // Insert outbox intent
       await phase1Client.query(
@@ -581,7 +617,7 @@ export class GrpcWitnessServiceImpl {
           req.ticket_id,
           epochId,
           currentAllocatedSeq,
-          preimageStub,
+          canonicalPreimage,
           fencingGen,
           peer.identity,
           leaseExpiresAt,
@@ -600,6 +636,11 @@ export class GrpcWitnessServiceImpl {
         allocatedSeq: currentAllocatedSeq,
         windowId: resolvedWindowId,
         requestedAmt: resolvedRequestedAmt,
+        policyId: resolvedPolicyId,
+        policyRevision: resolvedPolicyRevision,
+        preimageData,
+        canonicalPreimage,
+        nowCommitted: now,
       };
     }, 10);
 
@@ -610,33 +651,11 @@ export class GrpcWitnessServiceImpl {
     allocatedSeq = phase1Result.allocatedSeq!;
     windowId = phase1Result.windowId!;
     requestedAmt = phase1Result.requestedAmt!;
+    const preimageData = phase1Result.preimageData!;
+    const canonicalPreimage = phase1Result.canonicalPreimage!;
+    const nowCommitted = phase1Result.nowCommitted!;
 
     // PHASE 2: Signature Generation
-    const nowCommitted = Math.floor(Date.now() / 1000);
-    const preimageData: ReceiptPreimageData = {
-      version: 1,
-      witness_id: this.signer.getWitnessId(),
-      epoch_id: epochId,
-      sequence_number: allocatedSeq,
-      ticket_id: req.ticket_id,
-      authorization_id: req.authorization_id,
-      binding_digest: req.binding_digest,
-      policy_id: "default-policy",
-      policy_revision: 1,
-      debited_amount: requestedAmt,
-      budget_windows: windowId
-        ? [
-            {
-              window_type: 1,
-              window_start_seconds: nowCommitted,
-              cumulative_spent_after: requestedAmt,
-            },
-          ]
-        : [],
-      committed_at_seconds: nowCommitted,
-    };
-
-    const canonicalPreimage = formatCanonicalPreimage(preimageData);
     const { signatureHex, generation: signedGen } = await this.signer.signReceipt(
       canonicalPreimage,
       fencingGen,
@@ -657,6 +676,22 @@ export class GrpcWitnessServiceImpl {
       budget_windows: preimageData.budget_windows,
       committed_at_seconds: nowCommitted,
       signature: signatureHex,
+      // camelCase fields for direct SDK and cryptographic verification
+      witnessId: this.signer.getWitnessId(),
+      epochId,
+      sequenceNumber: allocatedSeq,
+      ticketId: req.ticket_id,
+      authorizationId: req.authorization_id,
+      bindingDigest: req.binding_digest,
+      policyId: preimageData.policy_id,
+      policyRevision: preimageData.policy_revision,
+      debitedAmount: requestedAmt,
+      budgetWindows: (preimageData.budget_windows || []).map((bw: any) => ({
+        windowType: normalizeBudgetWindowType(bw.window_type ?? bw.windowType),
+        windowStart: Number(bw.window_start_seconds ?? bw.windowStart ?? 0),
+        cumulativeSpentAfter: String(bw.cumulative_spent_after ?? bw.cumulativeSpentAfter ?? "0"),
+      })),
+      committedAtSeconds: nowCommitted,
     };
 
     // Ensure predecessor resolution and chain ordering

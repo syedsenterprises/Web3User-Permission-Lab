@@ -58,7 +58,16 @@ export function parseEd25519PublicKey(key: KeyObject | string): KeyObject | null
     if (key instanceof KeyObject) {
       keyObj = key;
     } else if (typeof key === "string") {
-      keyObj = createPublicKey(key);
+      const trimmed = key.trim();
+      if (/^[a-f0-9]{64}$/i.test(trimmed)) {
+        const spkiDer = Buffer.concat([
+          Buffer.from("302a300506032b6570032100", "hex"),
+          Buffer.from(trimmed, "hex"),
+        ]);
+        keyObj = createPublicKey({ key: spkiDer, format: "der", type: "spki" });
+      } else {
+        keyObj = createPublicKey(key);
+      }
     } else {
       return null;
     }

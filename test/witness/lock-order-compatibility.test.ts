@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { createHash } from "node:crypto";
 import pg from "pg";
 import {
   PostgresWitnessStore,
@@ -87,12 +88,16 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
     }
   }, 30000);
 
+  function mockSha256(seed: string): string {
+    return "sha256:" + createHash("sha256").update(seed).digest("hex");
+  }
+
   // ==========================================================================
   // TEST-LOCK-01: Legacy D1 Inversion Root Cause Verification & Fix
   // ==========================================================================
   it("TEST-LOCK-01: commitTicketPhase1 acquires witness_epochs FIRST and does not lock witness_tickets when epoch is locked", async () => {
     const authId = `auth-lock01-${Date.now()}`;
-    const bindingDigest = "sha256:digest-lock-01";
+    const bindingDigest = mockSha256("digest-lock-01");
 
     // 1. Reserve ticket
     const reserveRes = await store.reserveTicket({
@@ -186,7 +191,7 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
       authIds.push(authId);
       const res = await workerStore.reserveTicket({
         authorizationId: authId,
-        bindingDigest: `sha256:digest-lock02-${i}`,
+        bindingDigest: mockSha256(`digest-lock02-${i}`),
         policyId: "policy-lock-02",
         policyRevision: 1,
         idempotencyKey: `idem-${authId}`,
@@ -219,7 +224,7 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
         return await workerStore.commitTicket({
           ticketId: tid,
           authorizationId: authIds[idx],
-          bindingDigest: `sha256:digest-lock02-${idx}`,
+          bindingDigest: mockSha256(`digest-lock02-${idx}`),
           localCommittedAtSeconds: Math.floor(Date.now() / 1000),
         });
       } catch (e: any) {
@@ -249,7 +254,7 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
   // ==========================================================================
   it("TEST-LOCK-03: D2 Phase 3 locks witness_tickets FOR UPDATE before receipt insertion, eliminating lock upgrade races", async () => {
     const authId = `auth-lock03-${Date.now()}`;
-    const bindingDigest = "sha256:digest-lock-03";
+    const bindingDigest = mockSha256("digest-lock-03");
 
     const res = await client.reserveTicket({
       authorizationId: authId,
@@ -298,7 +303,7 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
       await new Promise((r) => setTimeout(r, i * 25));
       try {
         const authId = `auth-mixed-${Date.now()}-${i}`;
-        const digest = `sha256:mixed-digest-${i}`;
+        const digest = mockSha256(`mixed-digest-${i}`);
 
         // Reserve with budget window
         const reserveRes = await client.reserveTicket({
@@ -391,17 +396,19 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
 
     const authId1 = `auth-lock05-rel-${Date.now()}`;
     const authId2 = `auth-lock05-quar-${Date.now()}`;
+    const digestD1 = mockSha256("d1");
+    const digestD2 = mockSha256("d2");
 
     const t1 = await testStore.reserveTicket({
       authorizationId: authId1,
-      bindingDigest: "sha256:d1",
+      bindingDigest: digestD1,
       policyId: "policy-lock-05",
       policyRevision: 1,
       idempotencyKey: `idem-${authId1}`,
     });
     const t2 = await testStore.reserveTicket({
       authorizationId: authId2,
-      bindingDigest: "sha256:d2",
+      bindingDigest: digestD2,
       policyId: "policy-lock-05",
       policyRevision: 1,
       idempotencyKey: `idem-${authId2}`,
@@ -423,7 +430,7 @@ describe("Milestone 13-D: D1/D2 Lock-Order Compatibility & Deadlock Freedom Suit
         .releaseTicket({
           ticketId: t1.ticketId!,
           authorizationId: authId1,
-          bindingDigest: "sha256:d1",
+          bindingDigest: digestD1,
           reason: "Voluntary release in lock-05 test",
         })
         .then(() => {
