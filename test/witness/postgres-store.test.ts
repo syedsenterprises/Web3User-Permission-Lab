@@ -1357,15 +1357,19 @@ describe("Milestone 13-D: D1 Backend Foundation (PostgreSQL 16 Witness Store)", 
   it("F4: runtime privilege restrictions: web3user_app cannot alter schema, disable triggers, truncate, update, or delete immutable records", async () => {
     const rawPool: pg.Pool = (store as any).pool;
 
+    // Ephemeral test-only credentials for local RBAC boundary verification
+    const TEST_FIXTURE_ADMIN_ROLE_PASSWORD = "web3user_admin_pass";
+    const TEST_FIXTURE_APP_ROLE_PASSWORD = "web3user_app_pass";
+
     // Ensure roles, ownership, and grants are established
     await rawPool.query(`
       DO $$
       BEGIN
         IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web3user_admin') THEN
-          CREATE ROLE web3user_admin WITH LOGIN PASSWORD 'web3user_admin_pass';
+          CREATE ROLE web3user_admin WITH LOGIN PASSWORD '${TEST_FIXTURE_ADMIN_ROLE_PASSWORD}';
         END IF;
         IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'web3user_app') THEN
-          CREATE ROLE web3user_app WITH LOGIN PASSWORD 'web3user_app_pass';
+          CREATE ROLE web3user_app WITH LOGIN PASSWORD '${TEST_FIXTURE_APP_ROLE_PASSWORD}';
         END IF;
       END $$;
 
@@ -1417,7 +1421,7 @@ describe("Milestone 13-D: D1 Backend Foundation (PostgreSQL 16 Witness Store)", 
       host: process.env.PGHOST || "127.0.0.1",
       port: Number(process.env.PGPORT || 5432),
       user: "web3user_app",
-      password: "web3user_app_pass",
+      password: TEST_FIXTURE_APP_ROLE_PASSWORD,
       database: process.env.PGDATABASE || "web3user_witness_test",
     });
     await appClient.connect();

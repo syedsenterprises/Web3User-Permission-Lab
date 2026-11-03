@@ -1,0 +1,15 @@
+# Gitleaks configuration for Web3User-Permission-Lab
+# Narrows exclusions strictly to verified test fixtures and false-positive patterns.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Narrow allowlist for verified test fixture idempotency tokens"
+paths = [
+    '''test/durable-witness\.test\.ts''',
+    '''test/monotonic-witness\.test\.ts'''
+]
+regexes = [
+    '''idempotencyKey:\s*"(?:idemp-mismatch-01|idemp-quarantine-0[12]|idemp_sec_m11_02_[a-z_]+|idemp-forge-01)"'''
+]
