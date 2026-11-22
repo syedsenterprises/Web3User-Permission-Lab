@@ -205,3 +205,7 @@ This is a local authorization demonstration only. An `ALLOW` result does not mea
 - **Durable Consumption Without Automatic Reversal**: An `ALLOW` consumption reservation is durable and permanent in SQLite (`state = 'consumed'`). It is not automatically reversed if downstream on-chain broadcasting fails, times out, reverts, or is dropped from the mempool.
 - **Dual Spending Controls**: `maxAmount` bounds each individual action; optional `budget` limits cumulative spending across transactions within fixed UTC hourly or daily windows.
 - **Pre-Release Audit Notice**: This release candidate is not audited for production deployment. Do not use it as the sole security control for high-value mainnet treasuries or unmonitored autonomous execution.
+
+## Support this project
+
+If this project is useful to you, consider sponsoring its development: https://github.com/sponsors/syedsenterprises
