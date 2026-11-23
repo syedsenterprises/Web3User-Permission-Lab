@@ -43,130 +43,176 @@ export async function startGrpcWitnessServer(
     DependencyPinValidator.assertPinnedDependencies();
   }
 
-  // Step 1: Execute Startup Outbox Reconciliation Sweep
-  await options.serviceImpl.startupOutboxReconciliationSweep();
-
-  // Step 2: Load Protocol Buffers Definition
-  const protoPath = path.join(__dirname, "proto", "witness.proto");
-  const packageDefinition = protoLoader.loadSync(protoPath, {
-    keepCase: true,
-    longs: String,
-    enums: String,
-    defaults: true,
-    oneofs: true,
-  });
-
-  const protoDescriptor = grpc.loadPackageDefinition(packageDefinition) as any;
-  const witnessProto = protoDescriptor.web3user.witness.v1.WitnessService;
-
-  // Step 3: Instantiate gRPC Server
-  const server = new grpc.Server();
-
-  // Helper to extract authenticated peer strictly from actual TLS session socket
-  function extractCallPeer(call: any): AuthenticatedPeer {
-    const socket = call.call?.stream?.session?.socket;
-    let peerCert: X509Certificate | null = null;
-    if (socket && typeof socket.getPeerX509Certificate === "function") {
-      try {
-        peerCert = socket.getPeerX509Certificate();
-      } catch {
-        peerCert = null;
-      }
-    }
-
-    if (!peerCert) {
-      const err = new Error(
-        "UNAUTHENTICATED: Mutual TLS required; peer certificate not present on TLS transport",
-      );
-      (err as any).code = grpc.status.UNAUTHENTICATED;
-      throw err;
-    }
-
-    return PeerAuthorizer.extractPeer(peerCert, options.caCert);
+  // Step 0.5: Initialize Signer strictly before outbox reconciliation sweep and listener binding
+  let signerInitialized = false;
+  if (typeof options.serviceImpl.initializeSigner === "function") {
+    await options.serviceImpl.initializeSigner();
+    signerInitialized = true;
   }
 
-  // Adapter wrapping async service methods to standard gRPC callback signature
-  function wrapRpc(
-    fn: (call: any, peer: AuthenticatedPeer) => Promise<any>,
-  ): (call: any, callback: grpc.sendUnaryData<any>) => void {
-    return (call: any, callback: grpc.sendUnaryData<any>) => {
-      try {
-        const peer = extractCallPeer(call);
-        fn(call, peer)
-          .then((result) => callback(null, result))
-          .catch((err) => {
-            const grpcErr: grpc.ServiceError = {
-              name: err.name || "ServiceError",
-              message: err.message,
-              code: err.code || grpc.status.INTERNAL,
-              details: err.message,
-              metadata: new grpc.Metadata(),
-            };
-            if ((err as any).retryAfterMs) {
-              grpcErr.metadata.set("retry-after-ms", String((err as any).retryAfterMs));
-            }
-            callback(grpcErr, null);
-          });
-      } catch (authErr: any) {
-        const grpcErr: grpc.ServiceError = {
-          name: authErr.name || "AuthError",
-          message: authErr.message,
-          code: authErr.code || grpc.status.UNAUTHENTICATED,
-          details: authErr.message,
-          metadata: new grpc.Metadata(),
-        };
-        callback(grpcErr, null);
-      }
-    };
-  }
+  let server: grpc.Server | null = null;
 
-  // Bind service implementation
-  server.addService(witnessProto.service, {
-    GetSyncStatus: wrapRpc((call, peer) => options.serviceImpl.getSyncStatus(call, peer)),
-    ReserveTicket: wrapRpc((call, peer) => options.serviceImpl.reserveTicket(call, peer)),
-    CommitTicket: wrapRpc((call, peer) => options.serviceImpl.commitTicket(call, peer)),
-    ReleaseTicket: wrapRpc((call, peer) => options.serviceImpl.releaseTicket(call, peer)),
-    ReconcileTicket: wrapRpc((call, peer) => options.serviceImpl.reconcileTicket(call, peer)),
-    ListUnfinalizedTickets: wrapRpc((call, peer) => options.serviceImpl.listUnfinalizedTickets(call, peer)),
-  });
+  try {
+    // Step 1: Execute Startup Outbox Reconciliation Sweep
+    await options.serviceImpl.startupOutboxReconciliationSweep();
 
-  // Step 4: Configure Credentials (mTLS vs Insecure)
-  let credentials = grpc.ServerCredentials.createInsecure();
-  if (options.caCert && options.serverCert && options.serverKey) {
-    credentials = grpc.ServerCredentials.createSsl(
-      options.caCert,
-      [
-        {
-          cert_chain: options.serverCert,
-          private_key: options.serverKey,
-        },
-      ],
-      true, // require client cert validation
-    );
-  }
-
-  // Step 5: Bind Listener to Port
-  const host = options.host || "127.0.0.1";
-  const requestedPort = options.port !== undefined ? options.port : 0;
-
-  return new Promise((resolve, reject) => {
-    server.bindAsync(`${host}:${requestedPort}`, credentials, (err, boundPort) => {
-      if (err) {
-        return reject(err);
-      }
-
-      const started: StartedGrpcWitnessServer = {
-        server,
-        port: boundPort,
-        host,
-        stop: () => {
-          return new Promise<void>((res) => {
-            server.tryShutdown(() => res());
-          });
-        },
-      };
-
-      resolve(started);
+    // Step 2: Load Protocol Buffers Definition
+    const protoPath = path.join(__dirname, "proto", "witness.proto");
+    const packageDefinition = protoLoader.loadSync(protoPath, {
+      keepCase: true,
+      longs: String,
+      enums: String,
+      defaults: true,
+      oneofs: true,
     });
-  });
+
+    const protoDescriptor = grpc.loadPackageDefinition(packageDefinition) as any;
+    const witnessProto = protoDescriptor.web3user.witness.v1.WitnessService;
+
+    // Step 3: Instantiate gRPC Server
+    server = new grpc.Server();
+
+    // Helper to extract authenticated peer strictly from actual TLS session socket
+    function extractCallPeer(call: any): AuthenticatedPeer {
+      const socket = call.call?.stream?.session?.socket;
+      let peerCert: X509Certificate | null = null;
+      if (socket && typeof socket.getPeerX509Certificate === "function") {
+        try {
+          peerCert = socket.getPeerX509Certificate();
+        } catch {
+          peerCert = null;
+        }
+      }
+
+      if (!peerCert) {
+        const err = new Error(
+          "UNAUTHENTICATED: Mutual TLS required; peer certificate not present on TLS transport",
+        );
+        (err as any).code = grpc.status.UNAUTHENTICATED;
+        throw err;
+      }
+
+      return PeerAuthorizer.extractPeer(peerCert, options.caCert);
+    }
+
+    // Adapter wrapping async service methods to standard gRPC callback signature
+    function wrapRpc(
+      fn: (call: any, peer: AuthenticatedPeer) => Promise<any>,
+    ): (call: any, callback: grpc.sendUnaryData<any>) => void {
+      return (call: any, callback: grpc.sendUnaryData<any>) => {
+        try {
+          const peer = extractCallPeer(call);
+          fn(call, peer)
+            .then((result) => callback(null, result))
+            .catch((err) => {
+              const grpcErr: grpc.ServiceError = {
+                name: err.name || "ServiceError",
+                message: err.message,
+                code: err.code || grpc.status.INTERNAL,
+                details: err.message,
+                metadata: new grpc.Metadata(),
+              };
+              if ((err as any).retryAfterMs) {
+                grpcErr.metadata.set("retry-after-ms", String((err as any).retryAfterMs));
+              }
+              callback(grpcErr, null);
+            });
+        } catch (authErr: any) {
+          const grpcErr: grpc.ServiceError = {
+            name: authErr.name || "AuthError",
+            message: authErr.message,
+            code: authErr.code || grpc.status.UNAUTHENTICATED,
+            details: authErr.message,
+            metadata: new grpc.Metadata(),
+          };
+          callback(grpcErr, null);
+        }
+      };
+    }
+
+    // Bind service implementation
+    server.addService(witnessProto.service, {
+      GetSyncStatus: wrapRpc((call, peer) => options.serviceImpl.getSyncStatus(call, peer)),
+      ReserveTicket: wrapRpc((call, peer) => options.serviceImpl.reserveTicket(call, peer)),
+      CommitTicket: wrapRpc((call, peer) => options.serviceImpl.commitTicket(call, peer)),
+      ReleaseTicket: wrapRpc((call, peer) => options.serviceImpl.releaseTicket(call, peer)),
+      ReconcileTicket: wrapRpc((call, peer) => options.serviceImpl.reconcileTicket(call, peer)),
+      ListUnfinalizedTickets: wrapRpc((call, peer) => options.serviceImpl.listUnfinalizedTickets(call, peer)),
+    });
+
+    // Step 4: Configure Credentials (mTLS vs Insecure)
+    let credentials = grpc.ServerCredentials.createInsecure();
+    if (options.caCert && options.serverCert && options.serverKey) {
+      credentials = grpc.ServerCredentials.createSsl(
+        options.caCert,
+        [
+          {
+            cert_chain: options.serverCert,
+            private_key: options.serverKey,
+          },
+        ],
+        true, // require client cert validation
+      );
+    }
+
+    // Step 5: Bind Listener to Port
+    const host = options.host || "127.0.0.1";
+    const requestedPort = options.port !== undefined ? options.port : 0;
+
+    return await new Promise<StartedGrpcWitnessServer>((resolve, reject) => {
+      server!.bindAsync(`${host}:${requestedPort}`, credentials, (err, boundPort) => {
+        if (err) {
+          try {
+            server!.forceShutdown();
+          } catch {}
+          return reject(err);
+        }
+
+        let shutdownPromise: Promise<void> | null = null;
+
+        const stop = (): Promise<void> => {
+          if (shutdownPromise) {
+            return shutdownPromise;
+          }
+
+          shutdownPromise = (async () => {
+            try {
+              await new Promise<void>((res) => {
+                server!.tryShutdown(() => res());
+              });
+            } finally {
+              if (typeof options.serviceImpl.closeSigner === "function") {
+                await options.serviceImpl.closeSigner();
+              }
+            }
+          })();
+
+          return shutdownPromise;
+        };
+
+        const started: StartedGrpcWitnessServer = {
+          server: server!,
+          port: boundPort,
+          host,
+          stop,
+        };
+
+        resolve(started);
+      });
+    });
+  } catch (startupErr) {
+    if (server) {
+      try {
+        server.forceShutdown();
+      } catch {}
+    }
+    if (signerInitialized && typeof options.serviceImpl.closeSigner === "function") {
+      try {
+        await options.serviceImpl.closeSigner();
+      } catch (cleanupErr) {
+        // Guarantee preservation of original startup failure error
+      }
+    }
+    throw startupErr;
+  }
 }

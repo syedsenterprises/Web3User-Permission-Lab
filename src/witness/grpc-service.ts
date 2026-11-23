@@ -40,6 +40,22 @@ export class GrpcWitnessServiceImpl {
     this.circuitBreaker = config.circuitBreaker || LocalEpochCircuitBreaker.getInstance();
   }
 
+  async initializeSigner(): Promise<void> {
+    if (typeof this.signer.initialize === "function") {
+      await this.signer.initialize();
+    }
+  }
+
+  async closeSigner(drainTimeoutMs?: number): Promise<void> {
+    if (typeof this.signer.close === "function") {
+      await this.signer.close(drainTimeoutMs);
+    }
+  }
+
+  getSigner(): WitnessSigner {
+    return this.signer;
+  }
+
   // ==========================================================================
   // Helper: SHA-256
   // ==========================================================================

@@ -32,7 +32,7 @@ describe("Milestone 13-D Phase D2: Unit Verification Suite", () => {
   // 1. DependencyPinValidator Tests
   // ==========================================================================
   describe("DependencyPinValidator", () => {
-    it("asserts installed driver versions match exact pins (pg@8.23.1, pg-pool@3.14.0)", () => {
+    it("asserts installed driver and SDK versions match exact pins (pg@8.23.1, pg-pool@3.14.0, @aws-sdk/client-kms@3.1173.0, @google-cloud/kms@6.3.0)", () => {
       expect(() => {
         DependencyPinValidator.assertPinnedDependencies();
       }).not.toThrow();
@@ -41,6 +41,8 @@ describe("Milestone 13-D Phase D2: Unit Verification Suite", () => {
     it("verifies expected constants", () => {
       expect(DependencyPinValidator.EXPECTED_PG_VERSION).toBe("8.23.1");
       expect(DependencyPinValidator.EXPECTED_PG_POOL_VERSION).toBe("3.14.0");
+      expect(DependencyPinValidator.EXPECTED_AWS_KMS_VERSION).toBe("3.1173.0");
+      expect(DependencyPinValidator.EXPECTED_GCP_KMS_VERSION).toBe("6.3.0");
     });
   });
 

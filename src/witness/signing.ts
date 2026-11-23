@@ -5,7 +5,7 @@
  * signing intents. Strictly prohibits unverified test signer fallback in production environments.
  */
 
-import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
+import { generateKeyPairSync, sign, createHash, type KeyObject } from "node:crypto";
 import {
   canonicalWitnessReceiptPayload,
   type SignedWitnessReceipt,
@@ -222,6 +222,9 @@ export interface WitnessSigner {
   getPublicKeyHex(): string;
   getPublicKeyPem?(): string;
   getWitnessId(): string;
+  initialize?(): Promise<void>;
+  close?(drainTimeoutMs?: number): Promise<void>;
+  getState?(): string;
 }
 
 /**
@@ -231,12 +234,14 @@ export class LocalEd25519WitnessSigner implements WitnessSigner {
   private privateKey: KeyObject;
   private publicKey: KeyObject;
   private witnessId: string;
+  private state: "READY" | "CLOSED" = "READY";
 
   constructor(
     witnessId = "witness-node-local-1",
     privateKey?: KeyObject,
     publicKey?: KeyObject,
     allowInProduction = false,
+    expectedKeyFingerprint?: string,
   ) {
     if (process.env.NODE_ENV === "production" && !allowInProduction) {
       throw new Error(
@@ -252,12 +257,41 @@ export class LocalEd25519WitnessSigner implements WitnessSigner {
       this.privateKey = keys.privateKey;
       this.publicKey = keys.publicKey;
     }
+
+    if (expectedKeyFingerprint) {
+      const exported = this.publicKey.export({ type: "spki", format: "der" });
+      const rawKeyBytes = exported.subarray(exported.length - 32);
+      const computed = createHash("sha256").update(rawKeyBytes).digest("hex").toLowerCase();
+      if (computed !== expectedKeyFingerprint.toLowerCase()) {
+        throw new Error(
+          `Local Witness Public Key Fingerprint mismatch: expected ${expectedKeyFingerprint}, computed ${computed}`,
+        );
+      }
+    }
+  }
+
+  async initialize(): Promise<void> {
+    if (this.state === "CLOSED") {
+      throw new Error("Cannot initialize a closed signer");
+    }
+    // In-memory key is initialized synchronously during construction
+  }
+
+  async close(): Promise<void> {
+    this.state = "CLOSED";
+  }
+
+  getState(): string {
+    return this.state;
   }
 
   async signReceipt(
     preimage: string,
     fencingGeneration: number,
   ): Promise<{ signatureHex: string; generation: number }> {
+    if (this.state === "CLOSED") {
+      throw new Error("Cannot sign receipt: signer is closed");
+    }
     const signatureBuffer = sign(null, Buffer.from(preimage, "utf8"), this.privateKey);
     return {
       signatureHex: signatureBuffer.toString("hex").toLowerCase(),

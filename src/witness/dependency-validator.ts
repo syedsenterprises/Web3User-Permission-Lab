@@ -12,6 +12,8 @@ import * as fs from "node:fs";
 export class DependencyPinValidator {
   static readonly EXPECTED_PG_VERSION = "8.23.1";
   static readonly EXPECTED_PG_POOL_VERSION = "3.14.0";
+  static readonly EXPECTED_AWS_KMS_VERSION = "3.1173.0";
+  static readonly EXPECTED_GCP_KMS_VERSION = "6.3.0";
 
   private static findPackageJson(entryPath: string): { name: string; version: string } {
     let dir = path.dirname(entryPath);
@@ -28,10 +30,14 @@ export class DependencyPinValidator {
   static assertPinnedDependencies(): void {
     let resolvedPgVersion: string;
     let resolvedNestedPgPoolVersion: string;
+    let resolvedAwsKmsVersion: string;
+    let resolvedGcpKmsVersion: string;
+
+    const localRequire = createRequire(import.meta.url);
 
     try {
       // 1. Resolve pg entrypoint and version from disk hierarchy (handles lib/index.js)
-      const pgEntry = require.resolve("pg");
+      const pgEntry = localRequire.resolve("pg");
       const pgPkg = this.findPackageJson(pgEntry);
       resolvedPgVersion = pgPkg.version;
 
@@ -43,7 +49,7 @@ export class DependencyPinValidator {
       resolvedNestedPgPoolVersion = pgPoolPkg.version;
 
       // 3. Structural API Verification: verify expected public and private APIs
-      const pg = require("pg");
+      const pg = localRequire("pg");
       const Pool = pgRequire("pg-pool");
 
       if (typeof pg.Pool !== "function" || typeof Pool !== "function") {
@@ -61,18 +67,48 @@ export class DependencyPinValidator {
       if (typeof (Pool.prototype as any).destroy !== "undefined") {
         throw new Error("Unexpected pool.destroy detected; unverified pool disposal shape");
       }
+
+      // 4. Resolve and verify @aws-sdk/client-kms
+      const awsEntry = localRequire.resolve("@aws-sdk/client-kms");
+      const awsPkg = this.findPackageJson(awsEntry);
+      resolvedAwsKmsVersion = awsPkg.version;
+      const aws = localRequire("@aws-sdk/client-kms");
+      if (typeof aws.KMSClient !== "function") {
+        throw new Error("@aws-sdk/client-kms KMSClient constructor missing");
+      }
+
+      // 5. Resolve and verify @google-cloud/kms
+      const gcpEntry = localRequire.resolve("@google-cloud/kms");
+      const gcpPkg = this.findPackageJson(gcpEntry);
+      resolvedGcpKmsVersion = gcpPkg.version;
+      const gcp = localRequire("@google-cloud/kms");
+      if (typeof gcp.KeyManagementServiceClient !== "function") {
+        throw new Error("@google-cloud/kms KeyManagementServiceClient constructor missing");
+      }
     } catch (err: any) {
-      console.error("FATAL: Failed to resolve database driver packages in module tree", err);
+      console.error("FATAL: Failed to resolve database or KMS packages in module tree", err);
       process.exit(1);
     }
 
     if (
       resolvedPgVersion !== this.EXPECTED_PG_VERSION ||
-      resolvedNestedPgPoolVersion !== this.EXPECTED_PG_POOL_VERSION
+      resolvedNestedPgPoolVersion !== this.EXPECTED_PG_POOL_VERSION ||
+      resolvedAwsKmsVersion !== this.EXPECTED_AWS_KMS_VERSION ||
+      resolvedGcpKmsVersion !== this.EXPECTED_GCP_KMS_VERSION
     ) {
-      console.error("FATAL: Dependency tree drift detected! Pinned driver versions required.", {
-        expected: { pg: this.EXPECTED_PG_VERSION, "pg-pool": this.EXPECTED_PG_POOL_VERSION },
-        resolved: { pg: resolvedPgVersion, "pg-pool (from pg context)": resolvedNestedPgPoolVersion },
+      console.error("FATAL: Dependency tree drift detected! Pinned driver and SDK versions required.", {
+        expected: {
+          pg: this.EXPECTED_PG_VERSION,
+          "pg-pool": this.EXPECTED_PG_POOL_VERSION,
+          "@aws-sdk/client-kms": this.EXPECTED_AWS_KMS_VERSION,
+          "@google-cloud/kms": this.EXPECTED_GCP_KMS_VERSION,
+        },
+        resolved: {
+          pg: resolvedPgVersion,
+          "pg-pool (from pg context)": resolvedNestedPgPoolVersion,
+          "@aws-sdk/client-kms": resolvedAwsKmsVersion,
+          "@google-cloud/kms": resolvedGcpKmsVersion,
+        },
       });
       // Strict fail-closed startup abort: NEVER open gRPC listener under unverified driver versions
       process.exit(1);

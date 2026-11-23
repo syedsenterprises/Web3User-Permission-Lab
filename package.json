@@ -52,6 +52,8 @@
     "esbuild@0.28.2": true
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "3.1173.0",
+    "@google-cloud/kms": "6.3.0",
     "@grpc/grpc-js": "^1.14.7",
     "@grpc/proto-loader": "^0.7.15",
     "etcd3": "^1.1.2",

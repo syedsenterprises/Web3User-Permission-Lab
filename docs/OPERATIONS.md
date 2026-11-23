@@ -144,3 +144,289 @@ flowchart TD
 > - **External Epoch / Monotonic Counter Service**: A distributed consensus cluster (e.g. Raft, Apache ZooKeeper, Google Cloud Spanner) or hardware security module (HSM) with monotonic hardware counters can act as an external sequence witness that cannot be rewound by local disk snapshot restores.
 
 Web3User Permission Lab is an off-chain decision engine prototype and does not provide built-in distributed consensus. Production integrations must rely on downstream blockchain nonces or external consensus witnesses to achieve whole-system rollback resilience.
+
+
+---
+
+## 6. Cloud KMS Witness Operations & Key Lifecycle Runbooks
+
+### 6.1 AWS KMS Manual Key Resource Rotation Runbook
+AWS KMS does **not** support automatic or on-demand rotation for asymmetric keys. Rotation is performed via manual resource provisioning:
+
+#### Step 1: Provision New Key Resource
+```bash
+aws kms create-key \
+  --key-spec ECC_NIST_EDWARDS25519 \
+  --key-usage SIGN_VERIFY \
+  --description "Web3User Monotonic Witness Production Signing Key (Key Resource B)"
+```
+Note the newly generated Key ARN (`arn:aws:kms:<region>:<account>:key/<new-key-id>`).
+
+#### Step 2: Extract Public Key & SHA-256 Fingerprint
+```bash
+aws kms get-public-key --key-id <new-key-arn> --output text --query PublicKey | base64 -d > new_pub.der
+
+# Extract canonical SHA-256 fingerprint via self-contained Node.js command:
+# (Hashes strictly the 32-byte raw public key point der[12..44] per canonical definition):
+node -e '
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const der = fs.readFileSync("new_pub.der");
+const prefix = Buffer.from("302a300506032b6570032100", "hex");
+if (der.length !== 44 || !der.subarray(0, 12).equals(prefix)) throw new Error("Invalid Ed25519 SPKI DER");
+const keyObj = crypto.createPublicKey({ key: der, format: "der", type: "spki" });
+if (keyObj.asymmetricKeyType !== "ed25519") throw new Error("Not ed25519");
+console.log(crypto.createHash("sha256").update(der.subarray(12, 44)).digest("hex").toLowerCase());
+'
+```
+
+#### Step 3: Verifier Trust-Anchor Configuration
+`Web3UserEngine` receives the **actual public key** (`string` PEM or Node.js `KeyObject`) via `options.witnessPublicKey` at instantiation. A SHA-256 fingerprint is **not** a supported substitute for this public-key parameter (passing a fingerprint string causes `parseEd25519PublicKey` to throw `ValidationError`).
+
+Because `Web3UserEngine` accepts only a **single public key** at instantiation and does **not** support multiple concurrent trust anchors or runtime registry updates, operators cannot configure a single engine instance with a multi-key set. Instead, operators must utilize one of the two supported operational approaches:
+- **Separate Web3UserEngine Instances:** Deploy newly provisioned `Web3UserEngine` instances configured with the actual new public key (`pubNew`, e.g. from `new_pub.der` / PEM, with fingerprint $F_{\text{new}}$ recorded as audit metadata) for processing newly issued transactions, while retaining separate existing engine instances configured with the actual old public key (`pubOld`) for any operational contexts requiring historical key validation; or
+- **Standalone Historical Receipt Verification:** Utilize the existing standalone cryptographic verification function `verifyWitnessReceipt(pubOld, receipt)` (`src/monotonic-witness.ts:272`) with the actual retained public key to verify historical receipts offline without involving an active engine instance.
+
+#### Step 4: Reconfigure Witness Daemon
+Update witness environment configuration:
+```bash
+WITNESS_AWS_KMS_KEY_ID="<new-key-arn>"
+WITNESS_EXPECTED_KEY_FINGERPRINT="<new-fingerprint>"
+```
+
+#### Step 5: Rolling Restart & Validation
+Restart witness daemon instances. Sockets bind only after successful key probe against the new Key ARN.
+
+#### Step 6: Old Key Retirement Policy
+- Once all in-flight tickets signed by the old key have drained, disable signing on the old key resource to prevent further use:
+  ```bash
+  aws kms disable-key --key-id <old-key-arn>
+  ```
+- Retain the old KMS key resource in `Disabled` state or schedule deletion. Note that the AWS KMS key deletion waiting period (`--pending-window-in-days`) is configurable from 7 to 30 days, with 30 days being the AWS default if omitted. This operational runbook explicitly chooses and enforces **30 days** as its operational policy to provide a maximum recovery buffer against accidental deletion before permanent cryptographic erasure:
+  ```bash
+  aws kms schedule-key-deletion --key-id <old-key-arn> --pending-window-in-days 30
+  ```
+
+---
+
+### 6.2 Google Cloud KMS CryptoKeyVersion Lifecycle Runbook
+Google Cloud KMS manages key versions hierarchically under a `CryptoKey`:
+
+#### Step 1: Create New Key Version
+```bash
+gcloud kms keys versions create \
+  --location <location> \
+  --keyring <keyring-name> \
+  --key <key-name>
+```
+Cloud KMS assigns version number $N+1$ (e.g. `.../cryptoKeyVersions/2`).
+
+#### Step 2: Extract Public Key & Fingerprint
+```bash
+gcloud kms keys versions get-public-key 2 \
+  --location <location> \
+  --keyring <keyring-name> \
+  --key <key-name> \
+  --output-file new_pub.pem
+
+# Extract canonical SHA-256 fingerprint via self-contained Node.js command:
+# (Hashes strictly the 32-byte raw public key point der[12..44] per canonical definition):
+node -e '
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const pem = fs.readFileSync("new_pub.pem", "utf8");
+const keyObj = crypto.createPublicKey(pem);
+if (keyObj.asymmetricKeyType !== "ed25519") throw new Error("Not ed25519");
+const spkiDer = keyObj.export({ type: "spki", format: "der" });
+const prefix = Buffer.from("302a300506032b6570032100", "hex");
+if (spkiDer.length !== 44 || !spkiDer.subarray(0, 12).equals(prefix)) throw new Error("Invalid Ed25519 SPKI DER");
+console.log(crypto.createHash("sha256").update(spkiDer.subarray(12, 44)).digest("hex").toLowerCase());
+'
+```
+
+#### Step 3: Verifier Trust-Anchor Configuration
+As documented in §6.1, `Web3UserEngine` accepts a single public key and does not support runtime multi-key trust anchors. Deploy separate `Web3UserEngine` instances configured with `pubNew` for new traffic, and rely on standalone `verifyWitnessReceipt(pubOld, receipt)` for offline historical receipt verification.
+
+#### Step 4: Reconfigure Witness Daemon
+Update witness environment configuration:
+```bash
+WITNESS_GCP_KEY_VERSION_NAME="projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>/cryptoKeyVersions/2"
+WITNESS_EXPECTED_KEY_FINGERPRINT="<new-fingerprint>"
+```
+
+#### Step 5: Rolling Restart
+Restart witness daemon instances. Service verifies `ENABLED` state, fetches public key, validates CRC32C, and confirms fingerprint match before listener binding.
+
+#### Step 6: Old Key Version Deprecation & Scheduled Destruction
+- Disable old version:
+  ```bash
+  gcloud kms keys versions disable 1 \
+    --location <location> \
+    --keyring <keyring-name> \
+    --key <key-name>
+  ```
+- Schedule version destruction (Cloud KMS enforces a 24-hour to 30-day scheduled destruction window, defaulting to 30 days):
+  ```bash
+  gcloud kms keys versions destroy 1 \
+    --location <location> \
+    --keyring <keyring-name> \
+    --key <key-name>
+  ```
+
+---
+
+### 6.3 Reusable Multi-Format SPKI Fingerprint Extraction Helper & OpenSSL Parsing
+
+#### Reusable Node.js Helper Function
+```javascript
+import { createPublicKey, createHash } from "node:crypto";
+
+const CANONICAL_ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/**
+ * Extracts the canonical lowercase 64-character SHA-256 fingerprint from an Ed25519 public key.
+ * Canonical Fingerprint Definition: SHA-256(raw 32-byte Ed25519 public-key point), lowercase hex.
+ * Explicitly validates canonical RFC 8410 ASN.1 DER structure and OID prior to cryptographic instantiation.
+ *
+ * @param {string | Buffer} input - Public key in PEM format or 44-byte DER SPKI format
+ * @param {"pem" | "der" | "auto"} [format="auto"] - Expected encoding format
+ * @returns {string} Lowercase 64-character hex SHA-256 fingerprint of the 32-byte raw public key
+ */
+export function extractEd25519Fingerprint(input, format = "auto") {
+  let keyObj;
+  let spkiDer;
+
+  const isDer =
+    format === "der" ||
+    (format === "auto" && Buffer.isBuffer(input) && !input.toString("utf8").includes("-----BEGIN"));
+
+  if (isDer) {
+    if (!Buffer.isBuffer(input)) {
+      throw new Error("DER format requires a Buffer input");
+    }
+    // 1. Strict buffer-level length validation (no smuggled or truncated bytes)
+    if (input.length !== 44) {
+      throw new Error(`Invalid Ed25519 SPKI DER buffer length: expected exactly 44 bytes, got ${input.length}`);
+    }
+    // 2. Strict OID and bitstring prefix check (RFC 8410: 1.3.101.112 + 33-byte bitstring)
+    if (!input.subarray(0, 12).equals(CANONICAL_ED25519_SPKI_PREFIX)) {
+      throw new Error("Invalid Ed25519 SPKI structure: AlgorithmIdentifier OID mismatch (expected 1.3.101.112)");
+    }
+    // 3. Cryptographic instantiation with explicit DER SPKI options
+    keyObj = createPublicKey({
+      key: input,
+      format: "der",
+      type: "spki",
+    });
+    spkiDer = input;
+  } else {
+    // PEM format branch
+    keyObj = createPublicKey(input);
+    spkiDer = keyObj.export({ type: "spki", format: "der" });
+    if (spkiDer.length !== 44 || !spkiDer.subarray(0, 12).equals(CANONICAL_ED25519_SPKI_PREFIX)) {
+      throw new Error("Exported PEM key does not match canonical Ed25519 SPKI DER structure");
+    }
+  }
+
+  // 4. Validate parsed cryptographic key type
+  if (keyObj.asymmetricKeyType !== "ed25519") {
+    throw new Error(`Invalid key type: expected ed25519, got ${keyObj.asymmetricKeyType}`);
+  }
+
+  // 5. Extract strictly the trailing 32 raw public key bytes and hash
+  const rawKey = spkiDer.subarray(12, 44);
+  return createHash("sha256").update(rawKey).digest("hex").toLowerCase();
+}
+```
+
+#### OpenSSL ASN.1 Parsing Command for Independent Human Audit
+```bash
+openssl asn1parse -inform DER -in new_pub.der
+```
+Expected output:
+```text
+ 0:d=0  hl=2 l=  42 cons: SEQUENCE
+ 2:d=1  hl=2 l=   5 cons:  SEQUENCE
+ 4:d=2  hl=2 l=   3 prim:   OBJECT            :ED25519
+ 9:d=1  hl=2 l=  33 prim:  BIT STRING
+```
+
+---
+
+### 6.4 Key Rotation, Deprecation & Archival Public-Key Retention Protocol
+
+#### The Mathematical One-Way Hash Limitation
+The canonical fingerprint is defined as the SHA-256 hash of the raw 32-byte public-key point ($H(Q_{\text{raw}})$ where $Q_{\text{raw}} = \text{SPKI}[12..44]$). Because a cryptographic hash cannot be inverted to recover the elliptic-curve point $Q$, **a SHA-256 fingerprint alone CANNOT verify an Ed25519 signature and MUST NOT be treated as sufficient material for historical signature verification.**
+
+#### Mandatory Recoverable Public-Key Retention
+Operators **MUST** retain the actual public-key material in a fully recoverable form:
+- Valid RFC 8410 SubjectPublicKeyInfo PEM string (`-----BEGIN PUBLIC KEY-----...\n-----END PUBLIC KEY-----`); or
+- Canonical 44-byte SubjectPublicKeyInfo DER byte buffer (`302a300506032b6570032100` prefix + 32-byte raw key); or
+- The raw 32-byte Ed25519 public-key point ($Q_{\text{raw}}$).
+
+#### Archival Raw 32-Byte Key Conversion Protocol
+The existing verification API `verifyWitnessReceipt(publicKey, receipt)` (`src/monotonic-witness.ts:272`) accepts a Node.js `KeyObject` or a PEM string. If an operator archives the raw 32-byte public-key point ($Q_{\text{raw}}$), it is converted into an accepted verification input as follows:
+1. Prepend the canonical 12-byte RFC 8410 ASN.1 prefix (`302a300506032b6570032100` hex) to form the canonical 44-byte SPKI DER buffer:
+   ```javascript
+   const CANONICAL_ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+   const spkiDer = Buffer.concat([CANONICAL_ED25519_SPKI_PREFIX, rawKeyBytes]);
+   ```
+2. Instantiate a Node.js `KeyObject`:
+   ```javascript
+   const keyObj = crypto.createPublicKey({ key: spkiDer, format: "der", type: "spki" });
+   ```
+3. Pass `keyObj` to `verifyWitnessReceipt(keyObj, receipt)` or configure `Web3UserEngine({ witnessPublicKey: keyObj })`.
+
+**Preservation Guarantee:** This conversion is an exact, bijective structural wrapping reconstructing RFC 8410 §3. It preserves the exact original public key bit-for-bit, does not alter verification outcomes, and produces the exact same canonical fingerprint ($\text{SHA-256}(Q_{\text{raw}})$).
+
+#### Role of the Fingerprint
+The SHA-256 fingerprint is retained strictly as **supplementary identity, indexing, and audit metadata** (e.g. for key matching, configuration verification, and logging), not as the verification key itself.
+
+#### Retention Lifespan
+The retention duration for historical public-key material must strictly track the operational, legal, and compliance lifespan of the witness receipts themselves (e.g., 7–10+ years for financial records, audit logs, and dispute resolution).
+
+#### Decoupling Cloud Private-Key Lifecycle from Public Trust Material
+Remote cloud KMS lifecycle actions (such as disabling an AWS KMS key resource, scheduling AWS key deletion, or disabling/destroying a GCP `CryptoKeyVersion`) terminate the remote provider's ability to create *new* signatures. They have **zero cryptographic impact** on the offline verification of past receipts. Destroying remote private keys prevents future unauthorized signing; deleting local public-key material permanently destroys the ability to verify historical receipts.
+
+---
+
+### 6.5 Offline vs. Online Boundary Limitations
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                           OFFLINE HERMETIC BOUNDARY                            │
+├─────────────────────────────────────────────────┬──────────────────────────────┤
+│               PROVABLE OFFLINE                  │      CANNOT PROVE OFFLINE    │
+├─────────────────────────────────────────────────┼──────────────────────────────┤
+│ 1. Full ASN.1 SPKI parsing & OID validation     │ 1. Real-time IAM revocation  │
+│ 2. Unsigned 32-bit CRC32C descriptor checks     │    state in AWS/GCP IAM.     │
+│ 3. Lowercase 64-char SHA-256 Fingerprint Match  │ 2. KMS key deletion schedule │
+│ 4. PureEd25519 Pre-Commit Signature Match       │    state changes in cloud.   │
+│ 5. Mapping simulated provider error codes       │ 3. Physical HSM hardware     │
+│    (DisabledException, FAILED_PRECONDITION)     │    fault isolation.          │
+│ 6. Listener socket non-binding on init failure  │ 4. Cloud API latency spikes. │
+│ 7. Cross-database crash recovery idempotency    │ 5. Cloud billing / quotas.   │
+└─────────────────────────────────────────────────┴──────────────────────────────┘
+```
+
+#### Least-Privilege IAM Specifications
+- **AWS KMS Policy:**
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "Web3UserWitnessSigningOnly",
+        "Effect": "Allow",
+        "Action": [
+          "kms:GetPublicKey",
+          "kms:Sign"
+        ],
+        "Resource": "arn:aws:kms:<REGION>:<ACCOUNT>:key/<KEY_ID>"
+      }
+    ]
+  }
+  ```
+- **GCP Cloud KMS Custom IAM Role:**
+  - `cloudkms.cryptoKeyVersions.viewPublicKey` (initialization probe and fingerprint verification)
+  - `cloudkms.cryptoKeyVersions.useToSign` (receipt signing)

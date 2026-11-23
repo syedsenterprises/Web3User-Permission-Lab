@@ -14,3 +14,36 @@ export * from "./grpc-service.js";
 export * from "./grpc-server.js";
 export * from "./remote-witness-client.js";
 export * from "./mtls-certs.js";
+export {
+  DEFAULT_TOTAL_TIMEOUT_MS,
+  HARD_MAX_TIMEOUT_MS,
+  MAX_PER_ATTEMPT_DEADLINE_MS,
+  MAX_TOTAL_ATTEMPTS,
+  MAX_RETRIES,
+  BASE_BACKOFF_MS,
+  MAX_BACKOFF_MS,
+  MIN_REMAINING_BUDGET_FOR_RETRY_MS,
+  ED25519_SPKI_HEADER,
+  WitnessSignerError,
+  WitnessNotReadyError,
+  WitnessClosedError,
+  KmsConfigurationError,
+  KmsKeyValidationError,
+  KmsSignerUnavailableError,
+  WitnessUnavailableError as KmsWitnessUnavailableError,
+  type BaseCloudKmsSignerConfig,
+  type AwsKmsSignerConfig,
+  type GcpKmsSignerConfig,
+  type CloudKmsSignerConfig,
+  type SignerLifecycleState,
+  CloudKmsWitnessSigner,
+  calculateCrc32c,
+  parseAndValidateCrc32cValue,
+  verifyGcpPublicKeyCrc32c,
+  parseSpkiPemToDer,
+  extractRawEd25519PublicKey,
+  computeKeyFingerprint,
+} from "./cloud-kms-signer.js";
+export * from "./aws-kms-signer.js";
+export * from "./gcp-kms-signer.js";
+export * from "./signer-factory.js";
