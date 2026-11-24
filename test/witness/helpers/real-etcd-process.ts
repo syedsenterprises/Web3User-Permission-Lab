@@ -6,15 +6,15 @@
  * binary instance on loopback (127.0.0.1).
  */
 
-import { spawn, ChildProcess, execSync, execFile } from "node:child_process";
+import { spawn, ChildProcess, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as net from "node:net";
 import * as http from "node:http";
 import * as https from "node:https";
-import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFile);
+export const PINNED_ETCD_VERSION = "3.5.18";
+const MAX_OUTPUT_BUFFER_CHARS = 8192;
 
 export interface RealEtcdTlsOptions {
   caCertPath: string;
@@ -64,15 +64,36 @@ export class RealEtcdProcess {
   private logStream: fs.WriteStream | null = null;
   private isRunning = false;
   private readonly options: RealEtcdOptions;
+  private stdoutTail = "";
+  private stderrTail = "";
+  private exitInfo: string | null = null;
 
   constructor(options: RealEtcdOptions = {}) {
     this.options = options;
     this.name = options.name || `etcd-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    this.etcdBinary = path.resolve(process.cwd(), ".tmp/etcd-bin/v3.5.18/etcd.exe");
-    this.etcdctlBinary = path.resolve(process.cwd(), ".tmp/etcd-bin/v3.5.18/etcdctl.exe");
+
+    const ext = process.platform === "win32" ? ".exe" : "";
+    const binDir = process.env.ETCD_BIN_DIR
+      ? path.resolve(process.env.ETCD_BIN_DIR)
+      : path.resolve(process.cwd(), `.tmp/etcd-bin/v${PINNED_ETCD_VERSION}`);
+
+    this.etcdBinary = path.join(binDir, `etcd${ext}`);
+    this.etcdctlBinary = path.join(binDir, `etcdctl${ext}`);
 
     if (!fs.existsSync(this.etcdBinary)) {
-      throw new Error(`etcd binary not found at ${this.etcdBinary}. Verification pass failed or missing.`);
+      throw new Error(
+        `Pinned etcd v${PINNED_ETCD_VERSION} binary not found at ${this.etcdBinary}. Run 'node scripts/ensure-etcd.mjs' first.`
+      );
+    }
+
+    const versionOut = execFileSync(this.etcdBinary, ["--version"], {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    if (!versionOut.includes(`etcd Version: ${PINNED_ETCD_VERSION}`)) {
+      throw new Error(
+        `Unexpected etcd version at ${this.etcdBinary}; expected v${PINNED_ETCD_VERSION}, got:\n${versionOut}`
+      );
     }
 
     if (options.dataDir) {
@@ -150,20 +171,35 @@ export class RealEtcdProcess {
       }
     }
 
+    this.stdoutTail = "";
+    this.stderrTail = "";
+    this.exitInfo = null;
+
     this.child = spawn(this.etcdBinary, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
+      windowsHide: process.platform === "win32",
     });
 
-    if (this.child.stderr && this.logStream) {
-      this.child.stderr.pipe(this.logStream);
+    if (this.child.stderr) {
+      this.child.stderr.on("data", (chunk: Buffer) => {
+        this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-MAX_OUTPUT_BUFFER_CHARS);
+      });
+      if (this.logStream) {
+        this.child.stderr.pipe(this.logStream);
+      }
     }
-    if (this.child.stdout && this.logStream) {
-      this.child.stdout.pipe(this.logStream);
+    if (this.child.stdout) {
+      this.child.stdout.on("data", (chunk: Buffer) => {
+        this.stdoutTail = (this.stdoutTail + chunk.toString("utf8")).slice(-MAX_OUTPUT_BUFFER_CHARS);
+      });
+      if (this.logStream) {
+        this.child.stdout.pipe(this.logStream);
+      }
     }
 
-    this.child.on("exit", () => {
+    this.child.on("exit", (code, signal) => {
       this.isRunning = false;
+      this.exitInfo = `code=${code}, signal=${signal}`;
     });
 
     await this.waitForReady(10000);
@@ -177,22 +213,46 @@ export class RealEtcdProcess {
       return;
     }
 
-    const pid = this.child.pid;
-    try {
-      // Precise process termination on Windows
-      execSync(`taskkill /F /PID ${pid}`, { stdio: "ignore" });
-    } catch {
-      // Child may have already exited
-    }
-
-    await new Promise<void>((resolve) => {
-      if (!this.child || this.child.exitCode !== null) {
+    const child = this.child;
+    const pid = child.pid;
+    const waitExit = new Promise<void>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
         resolve();
         return;
       }
-      this.child.once("exit", () => resolve());
-      setTimeout(resolve, 2000);
+      child.once("exit", () => resolve());
     });
+
+    if (process.platform === "win32") {
+      try {
+        execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Child may have already exited
+        }
+      }
+      await Promise.race([waitExit, new Promise((r) => setTimeout(r, 2000))]);
+    } else {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // Child may have already exited
+      }
+      const graceful = await Promise.race([
+        waitExit.then(() => true),
+        new Promise<boolean>((r) => setTimeout(() => r(false), 1500)),
+      ]);
+      if (!graceful && child.exitCode === null && child.signalCode === null) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Child may have already exited
+        }
+        await Promise.race([waitExit, new Promise((r) => setTimeout(r, 1000))]);
+      }
+    }
 
     if (this.logStream) {
       this.logStream.end();
@@ -316,9 +376,16 @@ export class RealEtcdProcess {
       } catch {
         // Retry
       }
+      if (this.exitInfo) {
+        throw new Error(
+          `etcd instance ${this.name} exited before becoming ready (${this.exitInfo}).\nstderr:\n${this.stderrTail}\nstdout:\n${this.stdoutTail}`
+        );
+      }
       await new Promise((r) => setTimeout(r, 100));
     }
 
-    throw new Error(`etcd instance ${this.name} failed to reach ready state within ${timeoutMs}ms`);
+    throw new Error(
+      `etcd instance ${this.name} failed to reach ready state within ${timeoutMs}ms.\nstderr:\n${this.stderrTail}\nstdout:\n${this.stdoutTail}`
+    );
   }
 }
