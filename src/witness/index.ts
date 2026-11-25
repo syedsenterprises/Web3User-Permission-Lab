@@ -4,6 +4,7 @@
  */
 
 export * from "./postgres-store.js";
+export * from "./pg-pool-lifecycle.js";
 export * from "./disposal-adapter.js";
 export * from "./dependency-validator.js";
 export * from "./circuit-breaker.js";

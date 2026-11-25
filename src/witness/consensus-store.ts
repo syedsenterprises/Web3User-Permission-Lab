@@ -42,6 +42,12 @@ import {
 } from "./state-machine.js";
 import { PG_SQLSTATE } from "./postgres-store.js";
 
+import {
+  ManagedPgPoolLifecycle,
+  type PoolErrorCallback,
+  type PoolHealthStatus,
+} from "./pg-pool-lifecycle.js";
+
 const { Pool } = pg;
 
 // ============================================================================
@@ -149,6 +155,11 @@ export interface PostgresConsensusStoreOptions {
    * Default backpressure configuration overrides.
    */
   readonly backpressureConfig?: Partial<BackpressureConfig>;
+  /**
+   * Optional diagnostic callback invoked on idle-client errors for
+   * component-owned pools (`options.pool` omitted).
+   */
+  readonly onPoolError?: PoolErrorCallback;
 }
 
 export interface ConsensusStoreApplyOptions extends StateMachineApplyOptions {
@@ -301,12 +312,14 @@ function getPgErrorConstraint(err: unknown): string | undefined {
 export class PostgresConsensusStore {
   private readonly pool: pg.Pool;
   private readonly ownPool: boolean;
+  private readonly poolLifecycle: ManagedPgPoolLifecycle;
   private readonly clusterId: string;
   private readonly statementTimeoutMs: number;
   private readonly defaultMemoryRetentionWindow: bigint;
   private readonly defaultBackpressureConfig?: Partial<BackpressureConfig>;
   private authoritativeState: ApplicationState;
   private closed = false;
+  private closePromise: Promise<void> | null = null;
   /**
    * FIFO in-process async mutex serializing the full transaction-to-publication
    * sequence on this `PostgresConsensusStore` instance.
@@ -333,6 +346,13 @@ export class PostgresConsensusStore {
       this.pool = new Pool(config);
       this.ownPool = true;
     }
+
+    this.poolLifecycle = new ManagedPgPoolLifecycle({
+      component: "PostgresConsensusStore",
+      pool: this.pool,
+      ownPool: this.ownPool,
+      onPoolError: options.onPoolError,
+    });
 
     this.clusterId = options.clusterId ?? "default-cluster";
     if (!this.clusterId || this.clusterId.trim().length === 0) {
@@ -366,12 +386,33 @@ export class PostgresConsensusStore {
     return this.clusterId;
   }
 
+  public getPoolHealth(): PoolHealthStatus {
+    return this.poolLifecycle.getHealth();
+  }
+
+  public async verifyPoolHealth(): Promise<PoolHealthStatus> {
+    return this.poolLifecycle.verifyConnectivity();
+  }
+
   public async close(): Promise<void> {
-    this.closed = true;
-    await this.mutexTail;
-    if (this.ownPool) {
-      await this.pool.end();
+    if (this.closePromise) {
+      return this.closePromise;
     }
+    this.closed = true;
+    this.poolLifecycle.markClosing();
+    this.closePromise = (async () => {
+      await this.mutexTail;
+      if (this.ownPool) {
+        try {
+          await this.pool.end();
+        } finally {
+          this.poolLifecycle.markClosed();
+        }
+      } else {
+        this.poolLifecycle.markClosed();
+      }
+    })();
+    return this.closePromise;
   }
 
   private assertOpen(): void {

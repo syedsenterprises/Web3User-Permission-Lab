@@ -52,6 +52,12 @@ import type {
   MonotonicWitnessAdapter,
 } from "../monotonic-witness.js";
 
+import {
+  ManagedPgPoolLifecycle,
+  type PoolErrorCallback,
+  type PoolHealthStatus,
+} from "./pg-pool-lifecycle.js";
+
 const { Pool } = pg;
 
 // ============================================================================
@@ -219,6 +225,7 @@ export interface PostgresWitnessStoreOptions {
   readonly epochId?: string;
   readonly actorId?: string;
   readonly defaultLeaseTtlSeconds?: number;
+  readonly onPoolError?: PoolErrorCallback;
 }
 
 export class PostgresWitnessStore implements MonotonicWitnessAdapter {
@@ -227,6 +234,8 @@ export class PostgresWitnessStore implements MonotonicWitnessAdapter {
 
   private readonly pool: pg.Pool;
   private readonly ownPool: boolean;
+  private readonly poolLifecycle: ManagedPgPoolLifecycle;
+  private closePromise: Promise<void> | null = null;
   private readonly epochId: string;
   private readonly actorId: string;
   private readonly defaultLeaseTtlSeconds: number;
@@ -249,6 +258,13 @@ export class PostgresWitnessStore implements MonotonicWitnessAdapter {
       this.pool = new Pool(config);
       this.ownPool = true;
     }
+
+    this.poolLifecycle = new ManagedPgPoolLifecycle({
+      component: "PostgresWitnessStore",
+      pool: this.pool,
+      ownPool: this.ownPool,
+      onPoolError: options.onPoolError,
+    });
 
     this.epochId = options.epochId || "epoch-001";
     this.actorId = options.actorId || `pod-${randomBytes(4).toString("hex")}`;
@@ -452,10 +468,31 @@ export class PostgresWitnessStore implements MonotonicWitnessAdapter {
     }));
   }
 
+  getPoolHealth(): PoolHealthStatus {
+    return this.poolLifecycle.getHealth();
+  }
+
+  async verifyPoolHealth(): Promise<PoolHealthStatus> {
+    return this.poolLifecycle.verifyConnectivity();
+  }
+
   async close(): Promise<void> {
-    if (this.ownPool) {
-      await this.pool.end();
+    if (this.closePromise) {
+      return this.closePromise;
     }
+    this.poolLifecycle.markClosing();
+    this.closePromise = (async () => {
+      if (this.ownPool) {
+        try {
+          await this.pool.end();
+        } finally {
+          this.poolLifecycle.markClosed();
+        }
+      } else {
+        this.poolLifecycle.markClosed();
+      }
+    })();
+    return this.closePromise;
   }
 
   // ==========================================================================
@@ -1364,7 +1401,23 @@ export class PostgresWitnessStore implements MonotonicWitnessAdapter {
   // Status and Inspection
   // ==========================================================================
 
-  async getSyncStatus(lastSeenEpoch?: string, lastSeenSeq?: string): Promise<WitnessSyncStatus> {
+  async getSyncStatus(
+    lastSeenEpoch?: string,
+    lastSeenSeq?: string,
+  ): Promise<WitnessSyncStatus & { readonly poolHealth: PoolHealthStatus }> {
+    const preHealth = this.poolLifecycle.getHealth();
+    if (preHealth.closingOrClosed) {
+      return {
+        healthy: false,
+        epochId: this.epochId,
+        sequenceNumber: "0",
+        divergenceDetected: false,
+        reason: `Store pool is ${preHealth.state}`,
+        poolHealth: preHealth,
+      };
+    }
+
+    const epochBefore = this.poolLifecycle.getErrorEpoch();
     const client = await this.pool.connect();
     try {
       const res = await client.query(
@@ -1372,6 +1425,8 @@ export class PostgresWitnessStore implements MonotonicWitnessAdapter {
         [this.epochId],
       );
       const currentSeq = res.rows[0].max_seq.toString();
+      this.poolLifecycle.markVerifiedHealthy(epochBefore);
+      const poolHealth = this.poolLifecycle.getHealth();
 
       let divergence = false;
       let reason: string | undefined;
@@ -1389,6 +1444,7 @@ export class PostgresWitnessStore implements MonotonicWitnessAdapter {
         sequenceNumber: currentSeq,
         divergenceDetected: divergence,
         reason,
+        poolHealth,
       };
     } finally {
       client.release();
