@@ -22,14 +22,75 @@ Development-stage preview and release candidate (`v0.1.0-rc.1`). This software i
 
 ## Requirements
 - Node.js 22.13.0 or later. The persistent SQLite store uses the built-in `node:sqlite` module, which was added in Node.js 22.5.0 and is available without an experimental flag starting in 22.13.0.
-- npm
+- npm (the repository baseline is npm 11.20.0).
+
+### Reproducible Development Setup
+
+The repository pins its baseline development runtime in `.nvmrc` (Node.js 26.11.1) and declares the baseline package manager in `package.json` (`npm@11.20.0`). These are the project's reproducible local baseline; the supported Node.js range remains `>=22.13.0`, as declared by the package and exercised by the CI compatibility matrix.
+
+With [nvm](https://github.com/nvm-sh/nvm) installed, select the pinned Node.js version with `nvm install` and `nvm use`. On Windows, use [nvm-windows](https://github.com/coreybutler/nvm-windows); run `nvm install 26.11.1` and `nvm use 26.11.1` because its command behavior differs from nvm on Unix-like systems. Confirm the active versions before installing dependencies:
+
+```bash
+node --version
+npm --version
+```
+
+From a fresh checkout, install exactly the dependency versions recorded in `package-lock.json`:
+
+```bash
+npm ci
+```
+
+Do not use `npm install` for a routine clean recovery install; use it only when intentionally changing dependencies and the lockfile.
+
+### Container verification (Docker & Docker Compose)
+
+The repository provides a containerized reproducibility and verification harness for the Web3User SDK on Linux containers. The verification image installs all dependencies from `package-lock.json` under Node.js 26.11.1 and npm 11.20.0 with OpenSSL CLI tooling, builds the SDK distribution, validates TypeScript types, runs the Linux-compatible test suite against an isolated PostgreSQL instance, executes example workflows, verifies persistent replay prevention, and performs an npm packaging dry-run.
+
+> [!NOTE]
+> This container image is strictly a verification harness for the SDK library, not a long-running service or daemon. It exposes no public network ports.
+
+#### Prerequisites
+- Docker Engine / Docker Desktop (Linux container mode)
+- Docker Compose v2.0+
+
+#### Executing Verification
+
+1. **Build verification image:**
+   ```bash
+   docker build --tag web3user-permission-lab:verify .
+   ```
+
+2. **Run full automated verification with isolated PostgreSQL:**
+   ```bash
+   docker compose up --build --abort-on-container-exit --exit-code-from tester
+   ```
+
+3. **Clean up temporary verification resources:**
+   ```bash
+   docker compose down -v
+   ```
+
+#### PostgreSQL Isolation & Safety
+The Compose configuration launches an ephemeral `postgres:16-alpine` service with data stored entirely in memory via `tmpfs` (`/var/lib/postgresql/data`). No host port is published or bound to host network interfaces for the Compose PostgreSQL service. The tester container discovers and communicates with the database using Compose service DNS (`PGHOST=postgres`) across the user-defined Docker bridge network (`web3user_default`).
+
+Because `internal: true` is not configured, the default Docker bridge network permits outbound connectivity to external networks and the host gateway. The absence of published host ports protects host-native PostgreSQL instances (such as port 5432) from port collisions and external inbound network access, but it does not constitute guaranteed network-layer isolation from host services. When running multiple independent concurrent Compose verification runs on the same Docker daemon, assign unique Compose project names (`docker compose -p <project-name> ...`) to prevent naming and resource conflicts.
+
+#### Test Compatibility Breakdown
+- **Linux-Compatible Suites (32 files, 655 tests):** Executed automatically within the container. Covers all core unit tests, SQLite persistence, OpenSSL mTLS certificate generation and validation (`test/witness/unit-d2.test.ts`, `grpc-mtls-transport.test.ts`), in-process etcd mock adapter tests (`test/witness/etcd-client-adapter.test.ts`), and PostgreSQL integration suites (`test/witness/postgres-store.test.ts`, `test/witness/migration-003.test.ts`).
+- **Windows-Specific Suite (1 file, 26 tests):** `test/witness/etcd-client-adapter.real.test.ts` tests against a live, official etcd v3.5.18 Windows binary located in `.tmp/etcd-bin/v3.5.18/etcd.exe`. Because `.tmp/` is strictly excluded from the Docker build context by `.dockerignore` to preserve local binaries and prevent secret leakage, this suite runs natively on Windows hosts.
+
+The `.dockerignore` excludes local dependencies, build artifacts, transient data (`.tmp/`, `.demo-data/`), environment files, and private keys/certificates from the build context. Do not add secrets to the Docker build context.
 
 ## Run
+
 ```bash
-npm install
+npm run build
+npx tsc --noEmit
 npm test
 npx tsx examples/basic-authorization.ts
-npm run demo:persistent-replay
+npm run demo:persistent-replay -- --verify
+npm pack --dry-run --json
 ```
 
 ## Web3User Engine SDK Quickstart

@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import {
   Web3UserEngine,
@@ -21,9 +20,7 @@ import {
 const TEST_KEY_PAIR = generateIssuerKeyPair();
 
 function createTestDirectory(): string {
-  const dir = join(tmpdir(), `web3user-m13b-witness-test-${Date.now()}-${randomBytes(4).toString("hex")}`);
-  mkdirSync(dir, { recursive: true });
-  return dir;
+  return mkdtempSync(join(tmpdir(), "web3user-m13b-witness-test-"));
 }
 
 const SAMPLE_TRANSFER_CALLDATA =

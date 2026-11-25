@@ -3,9 +3,50 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Web3User Permission Lab is a development-stage prototype exploring explicit, testable policy checks for Web3 transaction authorization.">
+<meta name="description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development, 780 passing tests across 38 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
 <meta name="theme-color" content="#101a2c">
-<title>Web3User Permission Lab &mdash; Development Preview</title>
+<title>Web3User Permission Lab &mdash; Enterprise Off-Chain Permission &amp; Authorization Governance</title>
+<link rel="canonical" href="https://web3user.tech/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Web3User">
+<meta property="og:title" content="Web3User Permission Lab &mdash; Enterprise Off-Chain Permission Governance">
+<meta property="og:description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development, 780 passing tests across 38 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
+<meta property="og:url" content="https://web3user.tech/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Web3User Permission Lab &mdash; Enterprise Off-Chain Permission Governance">
+<meta name="twitter:description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development, 780 passing tests across 38 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://web3user.tech/#software",
+      "name": "Web3User Permission Lab",
+      "operatingSystem": "Cross-platform (Node.js >= 22.13.0)",
+      "applicationCategory": "SecurityApplication",
+      "description": "Enterprise off-chain transaction authorization SDK for Node.js featuring persistent authorization governance, cumulative budgets, hardware-backed Cloud KMS signers, and monotonic witness infrastructure.",
+      "url": "https://web3user.tech/",
+      "author": {
+        "@type": "Person",
+        "name": "Syed Shahed",
+        "affiliation": {
+          "@type": "Organization",
+          "name": "Syed's Enterprises",
+          "url": "https://syedsenterprises.org/"
+        }
+      }
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://web3user.tech/#website",
+      "url": "https://web3user.tech/",
+      "name": "Web3User",
+      "description": "Enterprise Web3 transaction authorization and permission governance SDK."
+    }
+  ]
+}
+</script>
 <link rel="stylesheet" href="css/demo.css">
 <style>
 :root{color-scheme:dark;--bg:#0b1220;--panel:#111d30;--line:#263752;--text:#eef4ff;--muted:#a7b6cc;--cyan:#71e2d0;--blue:#89b4ff;--gold:#ffd48a;--green:#7ce38b}
@@ -38,58 +79,67 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
 <body>
 <header class="wrap nav">
   <div class="brand">&#9672; Web3User Permission Lab</div>
-  <span class="pill">DEVELOPMENT PREVIEW &middot; v0.1.0-rc.1</span>
+  <span class="pill">ENGINEERING STATUS &middot; 24 NOV 2026</span>
 </header>
 <main class="wrap">
 <section class="hero">
-  <div class="eyebrow">Explicit permissions for Web3 actions</div>
+  <div class="eyebrow">Enterprise Off-Chain Permission &amp; Authorization Governance for Web3</div>
   <h1>Make transaction rules easier to inspect, test, and reason about.</h1>
-  <p>Web3User Permission Lab is an experimental, off-chain transaction authorization SDK for Node.js exploring how proposed blockchain actions can be checked against explicit, testable policies before execution. The current codebase is an in-process Node.js library supporting an ERC-20 transfer policy evaluator with cryptographic authorization binding and persistent SQLite replay protection&mdash;not a hosted API, cloud service, universal wallet, or production security product.</p>
+  <p>Web3User Permission Lab is an off-chain transaction authorization and governance SDK for Node.js. Its architecture has advanced from the core ERC-20 policy evaluator into persistent authorization governance, cumulative budgets, monotonic witness infrastructure, hardware-backed Cloud KMS signing (AWS KMS &amp; GCP Cloud KMS), and a verified pure state machine reducer for distributed consensus. The current public site remains an informational static preview: it is not a hosted authorization API, production wallet, transaction broadcaster, or production security service.</p>
   <div class="actions">
     <a class="btn primary" href="#demo">Interactive Policy Playground</a>
-    <a class="btn" href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Read the white paper (PDF v0.3.0)</a>
-    <a class="btn" href="assets/web3user-project-mindmap-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Open project mindmap (v0.3.0)</a>
+    <a class="btn" href="assets/web3user-engineering-roadmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer">Read engineering roadmap</a>
+    <a class="btn" href="assets/web3user-project-mindmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer">Open project mindmap</a>
+    <a class="btn" href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Read technical white paper (v0.3.0)</a>
   </div>
 </section>
 
 <div class="notice">
-  <strong>Development-stage notice:</strong> Web3User is an off-chain decision SDK, not a smart contract, blockchain validator, or transaction broadcaster. This static preview site is purely an informational document, not a functioning backend, hosted API, or interactive wallet playground. The prototype has not undergone an independent commercial security audit. Do not use it to protect real funds or authorize production transactions.
+  <strong>Development-stage notice:</strong> Web3User is an off-chain decision SDK, not a smart contract, blockchain validator, or transaction broadcaster. This static preview site is purely an informational document with an in-browser policy evaluator demo, not a functioning backend, hosted API, or interactive wallet playground. The prototype has not undergone an independent commercial security audit. Do not use it to protect real funds or authorize production transactions.
 </div>
 
 <section>
   <div class="checkpoint-box">
     <div class="checkpoint-header">
-      <div class="checkpoint-title">Current Release Candidate: v0.1.0-rc.1 &mdash; Off-Chain Authorization SDK</div>
-      <span class="checkpoint-tag">v0.1.0-rc.1 VERIFIED</span>
+      <div class="checkpoint-title">Current Engineering Snapshot &mdash; Milestone 13-D &amp; FN-SEC-01</div>
+      <span class="checkpoint-tag">DEVELOPMENT BRANCH · 780/780 TESTS PASSING</span>
     </div>
     <div class="checkpoint-grid">
       <div class="stat-item">
-        <div class="stat-label">Verified Commit (main)</div>
-        <div class="stat-code">30a4890b16a1e1e8c33c8efe03d7edd28e7806ae</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">test: increase Vitest timeouts for CI stability</div>
+        <div class="stat-label">Development Branch HEAD</div>
+        <div class="stat-code">694a951e9899b667d564a69bf42acde08312a04f</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">feature/m13-d-consensus · synchronized with origin</div>
       </div>
       <div class="stat-item">
-        <div class="stat-label">Release Candidate Tag</div>
-        <div class="stat-code">v0.1.0-rc.1 (ea52832)</div>
-        <div style="font-size:0.8rem;color:var(--gold);margin-top:2px;">Tagged commit: ea528326d514e46f1c93ab9d3f4c762b4e073730</div>
+        <div class="stat-label">Regression Verification</div>
+        <div class="stat-val" style="color:var(--green);">780/780 passed · 38 test suites</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">100% passing across Node.js / Linux / Windows suites · 0 failures</div>
       </div>
       <div class="stat-item">
-        <div class="stat-label">Hosted CI Matrix Result</div>
-        <div class="stat-val" style="color:var(--green);">332/332 passed (17 test files)</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">GitHub Actions run 40220716038 across Node.js 22, 24, and 26</div>
+        <div class="stat-label">Hardware-Backed Signing</div>
+        <div class="stat-val" style="color:var(--cyan);">FN-SEC-01 Accepted &amp; Verified</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">AWS KMS &amp; GCP Cloud KMS adapters · RFC 8410 DER normalization</div>
       </div>
       <div class="stat-item">
-        <div class="stat-label">Persistent Replay Protection</div>
-        <div class="stat-val" style="color:var(--cyan);">Verified via SQLite WAL store</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Step 1: ALLOW on fresh DB &middot; Step 2: DENY on replay</div>
+        <div class="stat-label">Consensus Foundation</div>
+        <div class="stat-val" style="color:var(--blue);">Stage 2-B.1 Reducer Audited</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Pure reducer · 11 actions · atomic epoch transitions · idempotency</div>
       </div>
     </div>
   </div>
 </section>
 
 <section>
-  <h2>Milestone 6 Security &amp; Durability Invariants Implemented</h2>
+  <h2>Implemented Security &amp; Durability Foundation</h2>
   <div class="grid">
+    <article class="card">
+      <h3>Hardware-Backed Cloud KMS/HSM Signing</h3>
+      <p>Production signer adapters for AWS KMS and GCP Cloud KMS with full DER-to-raw RFC 8410 64-byte Ed25519 signature normalization, algorithm contract enforcement, and factory resolution.</p>
+    </article>
+    <article class="card">
+      <h3>Deterministic Consensus State Reducer</h3>
+      <p>Pure state machine reducer governing distributed consensus log events with 11 action types, single-slot idempotency, atomic epoch transitions, and strict monotonic index enforcement.</p>
+    </article>
     <article class="card">
       <h3>Multi-Process Race &amp; Replay Prevention</h3>
       <p>Deterministic IPC rendezvous barriers release competing OS processes simultaneously to attempt consuming the same V3 authorization; tests strictly enforce exactly one ALLOW and three domain-level DENY outcomes with one persistent record.</p>
@@ -103,91 +153,107 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
       <p>Rigorous boundary tests enforce strict rejection at the exact expiration second (<code>nowSeconds &gt;= expiresAtSeconds</code>), clip expiry to authoritative policy/key caps, and enforce key validity windows and post-retirement forgery rejection.</p>
     </article>
     <article class="card">
-      <h3>Safe TTL Arithmetic &amp; Overflow Prevention</h3>
-      <p>Subtraction-first validity window calculation prevents integer overflow when evaluating large TTL inputs up to <code>Number.MAX_SAFE_INTEGER</code>, ensuring effective expiration deadlines never exceed JavaScript safe integer limits.</p>
-    </article>
-    <article class="card">
-      <h3>Persistent-State Invariants Across Restarts</h3>
-      <p>Durable SQLite table schemas, policy revisions, key governance states (active, retired, revoked), and monotonic clock high-water marks survive connection closes and restarts without state loss or corruption.</p>
-    </article>
-    <article class="card">
-      <h3>Process-Crash Recovery (WAL Journaling)</h3>
-      <p>Abrupt child worker termination during active uncommitted write transactions confirms automatic SQLite WAL rollback upon reopen. <em>Note: Qualified strictly as process-crash recovery testing, not physical power-loss durability.</em></p>
+      <h3>Monotonic Clock &amp; Replay Protection</h3>
+      <p>ClockGuard monotonic time anchoring prevents time-travel attacks. Monotonic clock high-water marks, policy revisions, key governance states, and SQLite WAL schemas survive restarts without corruption.</p>
     </article>
   </div>
 </section>
 
 <section>
-  <h2>Implemented Prototype Scope vs. Future Work</h2>
+  <h2>Current Architecture: Implemented vs. Not Yet Production-Ready</h2>
   <div class="grid">
     <article class="card">
-      <h3>Implemented in Prototype</h3>
-      <p>&bull; ERC-20 <code>transfer(address,uint256)</code> policy evaluator.<br>
-      &bull; Exact canonical binding digests (calldata, recipient, amount, chain ID, sender).<br>
-      &bull; Ed25519 V3 signed authorization artifacts with length-prefixed encoding.<br>
-      &bull; Monotonic policy revisions &amp; key registry governance in SQLite.<br>
-      &bull; Persistent two-phase replay protection (<code>issued</code> &rarr; <code>consumed</code>).</p>
+      <h3>Implemented &amp; Verified Foundation</h3>
+      <p>&bull; ERC-20 evaluator, canonical binding, Ed25519 V3 authorization artifacts.<br>
+      &bull; SQLite WAL persistence, single-use replay protection, policy/key governance, cumulative budgets.<br>
+      &bull; Monotonic clock and witness lifecycle, fail-closed recovery, bounded reconciliation pipeline.<br>
+      &bull; FN-SEC-01 Cloud KMS signers: AWS KMS and GCP Cloud KMS adapters, DER conversion, mock contract tests.<br>
+      &bull; M13-D Stage 2-B.1: Pure consensus state machine reducer with 11 action types and atomic epoch transitions.<br>
+      &bull; Comprehensive regression suite: 780 tests across 38 test files (100% passing).</p>
     </article>
     <article class="card">
-      <h3>Planned for Future Milestones</h3>
-      <p>&bull; Universal wallet integration &amp; RPC middleware adapters.<br>
-      &bull; Cumulative multi-transaction spending budgets over time windows.<br>
-      &bull; Arbitrary smart contract function call decoders.<br>
-      &bull; Multi-party threshold key signing and on-chain validator bindings.<br>
-      &bull; Formal external third-party security audits.</p>
+      <h3>Open Production Gates</h3>
+      <p>&bull; Stage 2-B.2 consensus persistence: etcd watch backpressure, durable PostgreSQL compaction, and snapshot storage.<br>
+      &bull; Stage 3-A multi-node Raft / etcd cluster validation.<br>
+      &bull; Revocation freshness worker and synchronization validation.<br>
+      &bull; Air-gapped backup-key ceremony and cross-store restore validation.<br>
+      &bull; Measured RPO/RTO restore drills and independent commercial security audit.</p>
     </article>
   </div>
 </section>
 
 <section>
-  <h2>Development Roadmap</h2>
+  <h2>Development Roadmap &mdash; Updated 24 November 2026</h2>
   <div class="roadmap">
     <div class="milestone">
-      <div class="id">M0&ndash;M3</div>
-      <div><strong>Core Foundation, Policy Evaluator, &amp; Initial Tests</strong><p>Evaluator logic, calldata decoding, parameter boundary checks, and test harnesses.</p></div>
-      <span class="status">COMPLETE</span>
+      <div class="id">M0&ndash;M8</div>
+      <div><strong>Policy Engine, Cryptographic Authorization, Persistence &amp; Budgets</strong><p>ERC-20 evaluation, canonical binding, Ed25519 V3 artifacts, SQLite WAL replay protection, governance, cumulative budgets, and hardening.</p></div>
+      <span class="status">IMPLEMENTED</span>
     </div>
     <div class="milestone">
-      <div class="id">M4&ndash;M5</div>
-      <div><strong>Canonical Transaction Binding &amp; Persistent Replay Protection</strong><p>Deterministic length-prefixed payload binding and SQLite two-phase state storage.</p></div>
-      <span class="status">COMPLETE</span>
+      <div class="id">M9&ndash;M10</div>
+      <div><strong>Adversarial Security &amp; Disaster-Recovery Hardening</strong><p>Budget hardening, lock-hold optimization, adversarial concurrency, and recovery design work represented in milestone history.</p></div>
+      <span class="status">COMMITTED</span>
     </div>
     <div class="milestone">
-      <div class="id">M6.1&ndash;M6.3</div>
-      <div><strong>V3 Ed25519 Signing, Monotonic Revisions, &amp; Safe Migrations</strong><p>Asymmetric artifact signing, authoritative policy revisions, and crash-safe schema evolution.</p></div>
-      <span class="status">COMPLETE</span>
+      <div class="id">M11&ndash;M13-C</div>
+      <div><strong>Monotonic Witness, Reconciliation Pipeline &amp; Lifecycle</strong><p>Monotonic witness adapter, fail-closed recovery, bounded reconciliation pipeline, and startup synchronization remediation.</p></div>
+      <span class="status">COMMITTED</span>
     </div>
     <div class="milestone">
-      <div class="id">M6.4</div>
-      <div><strong>Post-Commit Security &amp; Crash-Recovery Validation</strong><p>Multi-process race barriers, transaction rollback failure injection, safe TTL arithmetic, and process-crash recovery.</p></div>
-      <span class="status">COMPLETE</span>
+      <div class="id">FN-SEC-01</div>
+      <div><strong>Hardware-Backed Signing Adapters (AWS KMS &amp; GCP Cloud KMS)</strong><p>Production AWS KMS and GCP Cloud KMS signer adapters, RFC 8410 DER signature normalization, mock contract tests, and SignerFactory.</p></div>
+      <span class="status">ACCEPTED</span>
     </div>
     <div class="milestone">
-      <div class="id">v0.1.0-rc.1</div>
-      <div><strong>Release Candidate 1 &amp; Hosted CI Verification</strong><p>Release candidate packaging, full multi-version CI matrix passing across Node.js 22, 24, and 26 (332/332 tests), and pre-release security review.</p></div>
-      <span class="status current">CURRENT RC</span>
+      <div class="id">M13-D 2-B.1</div>
+      <div><strong>Consensus Pure State Machine Reducer</strong><p>Deterministic reducer for etcd consensus log events, 11 action types, single-slot idempotency, atomic epoch transitions, and monotonic indexing.</p></div>
+      <span class="status">ACCEPTED</span>
     </div>
     <div class="milestone">
-      <div class="id">M7</div>
-      <div><strong>Interactive Policy Playground &amp; Parity Test Suite</strong><p>Zero-dependency client-side evaluator with representative presets and parity verification against core SDK.</p></div>
-      <span class="status">COMPLETE</span>
+      <div class="id">M13-D 2-B.2</div>
+      <div><strong>Historical Retention, Snapshots &amp; Compaction</strong><p>Architectural decisions (ADR-010 to ADR-016), FCR-01 through FCR-07 reviews, and implementation plan finalized.</p></div>
+      <span class="status current">PLANNED</span>
     </div>
     <div class="milestone">
-      <div class="id">M8</div>
-      <div><strong>Stateful Cumulative Budget Enforcement</strong><p>Atomic hourly/daily cumulative budget caps enforced within SQLite write transactions with carry-forward across revisions.</p></div>
-      <span class="status current">CURRENT</span>
-    </div>
-    <div class="milestone">
-      <div class="id">M9</div>
-      <div><strong>External Wallet Boundaries &amp; Independent Security Review</strong><p>Universal wallet enforcement boundaries, adversarial fault injection, and formal third-party audit.</p></div>
+      <div class="id">Stage 3-A</div>
+      <div><strong>Multi-Node Raft / Consensus Cluster</strong><p>Multi-node consensus deployment, partition tolerance, and cluster failover verification.</p></div>
       <span class="status planned">PLANNED</span>
     </div>
+    <div class="milestone">
+      <div class="id">NEXT</div>
+      <div><strong>Production Readiness Gates</strong><p>Revocation freshness, live KMS cloud deployment, air-gapped backup keys, cross-store restore, measured RPO/RTO, and independent commercial audit.</p></div>
+      <span class="status planned">BLOCKED</span>
+    </div>
   </div>
+</section>
+
+<section>
+  <h2>Production Readiness — Open Blockers</h2>
+  <div class="grid">
+    <article class="card">
+      <h3>Revocation Freshness</h3>
+      <p>The 30-second fail-closed freshness gate still needs reliable background synchronization and integration validation.</p>
+    </article>
+    <article class="card">
+      <h3>Receipt Canonicalization</h3>
+      <p>gRPC and Engine currently use incompatible signing-preimage formats. A shared canonical format and verification tests are required.</p>
+    </article>
+    <article class="card">
+      <h3>Live Cloud KMS Deployment</h3>
+      <p>While the KMS signing adapters and contract tests are accepted, production deployment with live cloud infrastructure credentials remains to be provisioned.</p>
+    </article>
+    <article class="card">
+      <h3>Offline Recovery &amp; Restore</h3>
+      <p>Air-gapped backup-key custody, cross-store PostgreSQL / etcd / SQLite recovery, and measured RPO/RTO drills are not complete.</p>
+    </article>
+  </div>
+  <p class="muted">The current PostgreSQL-backed witness path remains the live authority / single point of failure. Do not interpret the committed consensus foundation as proof that etcd is already the live authorization path. No independent commercial security audit has been completed.</p>
 </section>
 
 <section class="demo-section" id="demo">
   <div class="demo-header">
-    <div class="eyebrow">Interactive Demonstration &middot; Milestone 7 &amp; 8</div>
+    <div class="eyebrow">Interactive Demonstration &middot; Client-Side Policy Evaluator</div>
     <h2>Interactive Policy Evaluator Playground</h2>
     <p>Test real-time off-chain authorization decisions against custom policies and transaction requests. The evaluation logic below executes natively in your browser using pure TypeScript/JavaScript equivalent to <code>src/policy.ts</code>.</p>
   </div>
@@ -343,18 +409,20 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
 <section>
   <h2>Project Documents</h2>
   <ul>
-    <li><a href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer"><strong>Technical white paper &mdash; v0.3.0 (PDF)</strong></a> &mdash; Milestone 6.4 Validation Draft (23 October 2026)</li>
-    <li><a href="assets/web3user-project-mindmap-v0.3.0.pdf" target="_blank" rel="noopener noreferrer"><strong>Detailed project mindmap &mdash; v0.3.0 (PDF)</strong></a> &mdash; Milestone 6.4 Checkpoint</li>
-    <li><a href="assets/web3user-whitepaper-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Technical white paper &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft (22 October 2026)</li>
-    <li><a href="assets/web3user-project-mindmap-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Detailed project mindmap &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft</li>
+    <li><a href="assets/web3user-engineering-roadmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer"><strong>Engineering status &amp; roadmap (PDF)</strong></a> &mdash; Updated 03 November 2026</li>
+    <li><a href="assets/web3user-project-mindmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer"><strong>System mindmap &amp; architectural tree (PDF)</strong></a> &mdash; Updated 03 November 2026</li>
+    <li><a href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Technical white paper &mdash; v0.3.0 (PDF)</a> &mdash; Historical Milestone 6.4 draft (23 October 2026)</li>
+    <li><a href="assets/web3user-project-mindmap-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Project mindmap &mdash; v0.3.0 (PDF)</a> &mdash; Historical Milestone 6.4 checkpoint</li>
+    <li><a href="assets/web3user-whitepaper-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Technical white paper &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft</li>
+    <li><a href="assets/web3user-project-mindmap-v0.2.0.pdf" target="_blank" rel="noopener noreferrer">Project mindmap &mdash; v0.2.0 (PDF)</a> &mdash; Historical archival draft</li>
   </ul>
 </section>
 </main>
 <footer>
-  <div class="wrap">Web3User Permission Lab &middot; Development Preview (v0.1.0-rc.1) &middot; This site is informational and does not provide financial, legal, or security guarantees.</div>
+  <div class="wrap">Web3User Permission Lab &middot; Engineering Status Snapshot: 24 November 2026 &middot; Syed Shahed &middot; <a href="https://syedsenterprises.org/" target="_blank" rel="noopener noreferrer">Syed's Enterprises</a> (<a href="mailto:info@syedsenterprises.org">info@syedsenterprises.org</a>) &middot; Informational preview only; not a production authorization service.</div>
 </footer>
 <script type="module">
-  import { initDemo } from "./js/demo-ui.js";
+  import { initDemo } from "./js/demo-ui.js?v=20261124";
   initDemo(document.getElementById("demo"));
 </script>
 </body>

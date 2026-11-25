@@ -1,0 +1,11 @@
+{
+  "name": "super-tree-7537",
+  "compatibility_date": "2026-11-23",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "website-preview"
+  },
+  "previews": {}
+}

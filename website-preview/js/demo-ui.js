@@ -9,7 +9,7 @@ import {
   evaluateDetailed,
   encodeTransferCalldata,
   ERC20_TRANSFER_SELECTOR,
-} from "./evaluator.js";
+} from "./evaluator.js?v=20261124";
 
 // Canonical USDC & demo addresses
 const USDC_MAINNET = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";

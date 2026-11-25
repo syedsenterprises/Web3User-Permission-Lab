@@ -5,6 +5,8 @@ coverage/
 
 # Demonstration and transient database state
 .demo-data/
+.tmp/
+.wrangler/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

@@ -5,6 +5,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,6 +18,28 @@ jobs:
       fail-fast: false
       matrix:
         node-version: ["22.13.0", "24", "26"]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: web3user_witness_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d web3user_witness_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: web3user_witness_test
 
     steps:
       - name: Check out repository
@@ -34,11 +57,24 @@ jobs:
       - name: Build SDK distribution
         run: npm run build
 
+      - name: Provision pinned etcd v3.5.18
+        run: node scripts/ensure-etcd.mjs
+
       - name: Verify TypeScript compilation
         run: npx tsc --noEmit
 
-      - name: Run test suite
-        run: npm test
+      - name: Run full test suite (including real etcd v3.5.18)
+        run: npx vitest run
+
+      - name: Print etcd logs on failure
+        if: failure()
+        run: |
+          if [ -d .tmp/logs ]; then
+            for f in .tmp/logs/*.log; do
+              echo "=== $f ==="
+              tail -n 100 "$f" || true
+            done
+          fi
 
       - name: Run basic authorization example
         run: npx tsx examples/basic-authorization.ts
@@ -48,3 +84,17 @@ jobs:
 
       - name: Verify package dry-run
         run: npm pack --dry-run --json
+
+  container-verify:
+    name: Linux container verification
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Run containerized verification with isolated PostgreSQL
+        run: docker compose up --build --abort-on-container-exit --exit-code-from tester
+
+      - name: Clean up verification containers
+        if: always()
+        run: docker compose down -v

@@ -1,0 +1,198 @@
+syntax = "proto3";
+
+package web3user.witness.v1;
+
+option go_package = "web3user/witness/v1;witnessv1";
+option java_multiple_files = true;
+option java_package = "com.web3user.witness.v1";
+
+// ============================================================================
+// Witness Service Definition
+// ============================================================================
+
+service WitnessService {
+  // Checks health, operating epoch, and monotonic sequence watermarks.
+  rpc GetSyncStatus (GetSyncStatusRequest) returns (GetSyncStatusResponse);
+
+  // Reserves capacity and creates an uncommitted ticket with a physical lease.
+  rpc ReserveTicket (ReserveTicketRequest) returns (ReserveTicketResponse);
+
+  // Commits a reserved ticket, allocates a sequence, and returns a signed receipt.
+  rpc CommitTicket (CommitTicketRequest) returns (CommitTicketResponse);
+
+  // Voluntarily releases an uncommitted ticket, refunding held budget capacity.
+  rpc ReleaseTicket (ReleaseTicketRequest) returns (ReleaseTicketResponse);
+
+  // Reconciles the durable state of a ticket after an engine restart or ambiguous timeout.
+  rpc ReconcileTicket (ReconcileTicketRequest) returns (ReconcileTicketResponse);
+
+  // Lists unfinalized tickets using bounded cursor-based pagination.
+  rpc ListUnfinalizedTickets (ListUnfinalizedTicketsRequest) returns (ListUnfinalizedTicketsResponse);
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum TicketState {
+  TICKET_STATE_UNSPECIFIED = 0;
+  TICKET_STATE_RESERVED = 1;
+  TICKET_STATE_COMMITTING_SIGNING_PENDING = 2;
+  TICKET_STATE_COMMITTED = 3;
+  TICKET_STATE_RELEASED = 4;
+  TICKET_STATE_QUARANTINED_UNCONFIRMED = 5;
+  TICKET_STATE_QUARANTINED_BLOCKED = 6;
+  TICKET_STATE_RELEASED_AFTER_AUDIT = 7;
+  TICKET_STATE_DISPUTED = 8;
+}
+
+enum BudgetWindowType {
+  BUDGET_WINDOW_TYPE_UNSPECIFIED = 0;
+  BUDGET_WINDOW_TYPE_HOURLY = 1;
+  BUDGET_WINDOW_TYPE_DAILY = 2;
+  BUDGET_WINDOW_TYPE_WEEKLY = 3;
+  BUDGET_WINDOW_TYPE_MONTHLY = 4;
+}
+
+// ============================================================================
+// Domain Entities
+// ============================================================================
+
+message BudgetWindowReservation {
+  BudgetWindowType window_type = 1;
+  int64 window_start_seconds = 2;
+  string requested_amount = 3;      // Canonical decimal uint256 string
+  string max_cumulative_amount = 4;  // Canonical decimal uint256 string
+}
+
+message BudgetWindowAllocation {
+  BudgetWindowType window_type = 1;
+  int64 window_start_seconds = 2;
+  string cumulative_spent_after = 3; // Canonical decimal uint256 string
+}
+
+message SignedWitnessReceipt {
+  int32 version = 1;                 // Protocol version (must be 1)
+  string witness_id = 2;
+  string epoch_id = 3;
+  string sequence_number = 4;        // Monotonic uint64 decimal string
+  string ticket_id = 5;
+  string authorization_id = 6;
+  string binding_digest = 7;         // sha256:64hex
+  string policy_id = 8;
+  int64 policy_revision = 9;
+  string debited_amount = 10;        // Canonical decimal uint256 string
+  repeated BudgetWindowAllocation budget_windows = 11;
+  int64 committed_at_seconds = 12;   // Authoritative Witness Database Timestamp (T_db)
+  string signature = 13;             // 128-hex lowercase Ed25519 signature
+}
+
+message UnfinalizedTicket {
+  string ticket_id = 1;
+  string authorization_id = 2;
+  string epoch_id = 3;
+  string binding_digest = 4;
+  TicketState state = 5;
+  int64 reserved_at_seconds = 6;
+  int64 expires_at_seconds = 7;
+  string owner_identity = 8;
+}
+
+// ============================================================================
+// Request / Response Messages
+// ============================================================================
+
+message GetSyncStatusRequest {
+  string last_seen_epoch_id = 1;
+  string last_seen_sequence_number = 2;
+}
+
+message GetSyncStatusResponse {
+  bool healthy = 1;
+  string epoch_id = 2;
+  string sequence_number = 3;
+  bool divergence_detected = 4;
+  string reason = 5;
+}
+
+message ReserveTicketRequest {
+  string authorization_id = 1;
+  string binding_digest = 2;
+  string policy_id = 3;
+  int64 policy_revision = 4;
+  repeated BudgetWindowReservation budget_windows = 5;
+  string idempotency_key = 6;        // 128-bit UUIDv4
+  int64 lease_ttl_seconds = 7;       // Default: 300
+}
+
+message ReserveTicketResponse {
+  enum Decision {
+    DECISION_UNSPECIFIED = 0;
+    DECISION_ALLOW = 1;
+    DECISION_DENY = 2;
+  }
+  Decision decision = 1;
+  string ticket_id = 2;
+  TicketState state = 3;
+  repeated string reasons = 4;
+  int64 lease_expires_at_seconds = 5;
+}
+
+message CommitTicketRequest {
+  string ticket_id = 1;
+  string authorization_id = 2;
+  string binding_digest = 3;
+  int64 local_committed_at_seconds = 4; // Client timestamp (INFORMATIONAL ONLY)
+  string idempotency_key = 5;           // 128-bit UUIDv4
+}
+
+message CommitTicketResponse {
+  enum Decision {
+    DECISION_UNSPECIFIED = 0;
+    DECISION_ALLOW = 1;
+    DECISION_DENY = 2;
+  }
+  Decision decision = 1;
+  SignedWitnessReceipt receipt = 2;
+  repeated string reasons = 3;
+  bool already_committed = 4;
+}
+
+message ReleaseTicketRequest {
+  string ticket_id = 1;
+  string authorization_id = 2;
+  string binding_digest = 3;
+  string reason = 4;
+  string idempotency_key = 5;
+}
+
+message ReleaseTicketResponse {
+  bool success = 1;
+  TicketState previous_state = 2;
+  repeated string reasons = 3;
+}
+
+message ReconcileTicketRequest {
+  string ticket_id = 1;
+  string authorization_id = 2;
+}
+
+message ReconcileTicketResponse {
+  string ticket_id = 1;
+  TicketState state = 2;
+  SignedWitnessReceipt receipt = 3;
+  repeated string reasons = 4;
+}
+
+message ListUnfinalizedTicketsRequest {
+  int32 limit = 1;                      // Max 500, default 100
+  int64 cursor_created_at_seconds = 2;  // Pagination cursor: created_at
+  string cursor_ticket_id = 3;          // Pagination cursor: ticket_id
+}
+
+message ListUnfinalizedTicketsResponse {
+  repeated UnfinalizedTicket tickets = 1;
+  int64 next_cursor_created_at_seconds = 2;
+  string next_cursor_ticket_id = 3;
+  bool has_more = 4;
+}

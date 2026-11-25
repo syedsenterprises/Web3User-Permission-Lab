@@ -230,8 +230,14 @@ export function canonicalWitnessReceiptPayload(receipt: Omit<SignedWitnessReceip
 
   const encodedWindows = receipt.budgetWindows
     .map((w) => {
+      const windowType =
+        w.windowType === "BUDGET_WINDOW_TYPE_HOURLY" || w.windowType === "HOURLY"
+          ? "HOURLY"
+          : w.windowType === "BUDGET_WINDOW_TYPE_DAILY" || w.windowType === "DAILY"
+            ? "DAILY"
+            : w.windowType;
       if (
-        (w.windowType !== "HOURLY" && w.windowType !== "DAILY") ||
+        (windowType !== "HOURLY" && windowType !== "DAILY") ||
         !Number.isSafeInteger(w.windowStart) ||
         w.windowStart < 0 ||
         typeof w.cumulativeSpentAfter !== "string" ||
@@ -239,7 +245,7 @@ export function canonicalWitnessReceiptPayload(receipt: Omit<SignedWitnessReceip
       ) {
         throw new Error("Invalid budget window in receipt.");
       }
-      return `${w.windowType}:${w.windowStart}:${w.cumulativeSpentAfter}`;
+      return `${windowType}:${w.windowStart}:${w.cumulativeSpentAfter}`;
     })
     .join(";");
 
