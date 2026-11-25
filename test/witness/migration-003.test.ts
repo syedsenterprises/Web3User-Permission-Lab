@@ -23,6 +23,11 @@ import pg from "pg";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  createManagedTestPool,
+  destroyDisposableTestDb,
+  closeAdminTestPool,
+} from "./helpers/pg-test-teardown.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,7 +43,7 @@ describe("Milestone 13-D Phase D3: Migration 003 Verification Suite", () => {
   const createdDatabases: string[] = [];
 
   beforeAll(async () => {
-    adminPool = new pg.Pool({
+    adminPool = createManagedTestPool({
       host: process.env.PGHOST || "127.0.0.1",
       port: Number(process.env.PGPORT || 5432),
       user: process.env.PGUSER || "postgres",
@@ -48,26 +53,14 @@ describe("Milestone 13-D Phase D3: Migration 003 Verification Suite", () => {
   });
 
   afterAll(async () => {
-    for (const dbName of createdDatabases) {
-      try {
-        await adminPool.query(`
-          SELECT pg_terminate_backend(pid) 
-          FROM pg_stat_activity 
-          WHERE datname = $1 AND pid <> pg_backend_pid()
-        `, [dbName]);
-        await adminPool.query(`DROP DATABASE IF EXISTS "${dbName}"`);
-      } catch (err) {
-        console.warn(`Failed to clean up disposable database ${dbName}:`, err);
-      }
-    }
-    await adminPool.end();
+    await closeAdminTestPool(adminPool, createdDatabases);
   });
 
   async function createDisposableDb(prefix: string): Promise<{ dbName: string; pool: pg.Pool }> {
     const dbName = `web3user_test_${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
     await adminPool.query(`CREATE DATABASE "${dbName}"`);
     createdDatabases.push(dbName);
-    const pool = new pg.Pool({
+    const pool = createManagedTestPool({
       host: process.env.PGHOST || "127.0.0.1",
       port: Number(process.env.PGPORT || 5432),
       user: process.env.PGUSER || "postgres",
@@ -78,15 +71,12 @@ describe("Milestone 13-D Phase D3: Migration 003 Verification Suite", () => {
   }
 
   async function destroyDisposableDb(dbName: string, pool: pg.Pool): Promise<void> {
-    await pool.end();
-    await adminPool.query(`
-      SELECT pg_terminate_backend(pid) 
-      FROM pg_stat_activity 
-      WHERE datname = $1 AND pid <> pg_backend_pid()
-    `, [dbName]);
-    await adminPool.query(`DROP DATABASE IF EXISTS "${dbName}"`);
-    const idx = createdDatabases.indexOf(dbName);
-    if (idx !== -1) createdDatabases.splice(idx, 1);
+    await destroyDisposableTestDb({
+      adminPool,
+      dbName,
+      pool,
+      trackedDatabases: createdDatabases,
+    });
   }
 
   it("1. Fresh database schema installation: full schema.sql creates all tables, triggers, and views", async () => {

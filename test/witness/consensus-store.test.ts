@@ -46,6 +46,11 @@ import {
   UnverifiableHistoricalEntryError,
 } from "../../src/witness/state-machine-types.js";
 import { computeCanonicalPayloadHash } from "../../src/witness/state-machine.js";
+import {
+  createManagedTestPool,
+  destroyDisposableTestDb,
+  closeAdminTestPool,
+} from "./helpers/pg-test-teardown.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,7 +103,7 @@ describe("Milestone 13-D Stage 2-B.2 Step 4: PostgresConsensusStore & F-STEP3-01
   const createdDatabases: string[] = [];
 
   beforeAll(async () => {
-    adminPool = new pg.Pool({
+    adminPool = createManagedTestPool({
       host: process.env.PGHOST || "127.0.0.1",
       port: Number(process.env.PGPORT || 5432),
       user: process.env.PGUSER || "postgres",
@@ -108,20 +113,7 @@ describe("Milestone 13-D Stage 2-B.2 Step 4: PostgresConsensusStore & F-STEP3-01
   });
 
   afterAll(async () => {
-    for (const dbName of createdDatabases) {
-      try {
-        await adminPool.query(
-          `SELECT pg_terminate_backend(pid)
-           FROM pg_stat_activity
-           WHERE datname = $1 AND pid <> pg_backend_pid()`,
-          [dbName]
-        );
-        await adminPool.query(`DROP DATABASE IF EXISTS "${dbName}"`);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
-    await adminPool.end();
+    await closeAdminTestPool(adminPool, createdDatabases);
   });
 
   async function createDisposableMigration004Db(
@@ -131,7 +123,7 @@ describe("Milestone 13-D Stage 2-B.2 Step 4: PostgresConsensusStore & F-STEP3-01
     await adminPool.query(`CREATE DATABASE "${dbName}"`);
     createdDatabases.push(dbName);
 
-    const pool = new pg.Pool({
+    const pool = createManagedTestPool({
       host: process.env.PGHOST || "127.0.0.1",
       port: Number(process.env.PGPORT || 5432),
       user: process.env.PGUSER || "postgres",
@@ -148,18 +140,12 @@ describe("Milestone 13-D Stage 2-B.2 Step 4: PostgresConsensusStore & F-STEP3-01
   }
 
   async function destroyDisposableDb(dbName: string, pool: pg.Pool): Promise<void> {
-    await pool.end();
-    await adminPool.query(
-      `SELECT pg_terminate_backend(pid)
-       FROM pg_stat_activity
-       WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [dbName]
-    );
-    await adminPool.query(`DROP DATABASE IF EXISTS "${dbName}"`);
-    const idx = createdDatabases.indexOf(dbName);
-    if (idx !== -1) {
-      createdDatabases.splice(idx, 1);
-    }
+    await destroyDisposableTestDb({
+      adminPool,
+      dbName,
+      pool,
+      trackedDatabases: createdDatabases,
+    });
   }
 
   // ==========================================================================
@@ -171,7 +157,7 @@ describe("Milestone 13-D Stage 2-B.2 Step 4: PostgresConsensusStore & F-STEP3-01
       await adminPool.query(`CREATE DATABASE "${dbName}"`);
       createdDatabases.push(dbName);
 
-      const pool = new pg.Pool({
+      const pool = createManagedTestPool({
         host: process.env.PGHOST || "127.0.0.1",
         port: Number(process.env.PGPORT || 5432),
         user: process.env.PGUSER || "postgres",

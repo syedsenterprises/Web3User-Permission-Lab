@@ -27,6 +27,11 @@ import {
 import { PostgresConsensusStore } from "../../src/witness/consensus-store.js";
 import { type CommittedConsensusEntry } from "../../src/witness/state-machine-types.js";
 import { computeCanonicalPayloadHash } from "../../src/witness/state-machine.js";
+import {
+  createManagedTestPool,
+  destroyDisposableTestDb,
+  closeAdminTestPool,
+} from "./helpers/pg-test-teardown.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -196,7 +201,7 @@ describe("Milestone 13-D Stage 2-B.2 Step 6: CompactionCoordinator Suite", () =>
     let store: PostgresConsensusStore;
 
     beforeAll(async () => {
-      adminPool = new pg.Pool({
+      adminPool = createManagedTestPool({
         host: process.env.PGHOST || "127.0.0.1",
         port: Number(process.env.PGPORT || 5432),
         user: process.env.PGUSER || "postgres",
@@ -205,7 +210,7 @@ describe("Milestone 13-D Stage 2-B.2 Step 6: CompactionCoordinator Suite", () =>
       });
       dbName = `web3user_test_comp_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
       await adminPool.query(`CREATE DATABASE "${dbName}"`);
-      pool = new pg.Pool({
+      pool = createManagedTestPool({
         host: process.env.PGHOST || "127.0.0.1",
         port: Number(process.env.PGPORT || 5432),
         user: process.env.PGUSER || "postgres",
@@ -218,15 +223,10 @@ describe("Milestone 13-D Stage 2-B.2 Step 6: CompactionCoordinator Suite", () =>
 
     afterAll(async () => {
       if (store) await store.close();
-      if (pool) await pool.end();
       if (adminPool && dbName) {
-        await adminPool.query(
-          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
-          [dbName]
-        );
-        await adminPool.query(`DROP DATABASE IF EXISTS "${dbName}"`);
+        await destroyDisposableTestDb({ adminPool, dbName, pool });
       }
-      if (adminPool) await adminPool.end();
+      if (adminPool) await closeAdminTestPool(adminPool);
     });
 
     beforeEach(async () => {
