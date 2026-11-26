@@ -262,130 +262,126 @@ export class RealEtcdProcess {
     this.isRunning = false;
   }
 
-  public async compact(revision: bigint): Promise<void> {
-    const isTls = Boolean(this.options.tls);
-    let caCert: Buffer | undefined;
-    let clientCert: Buffer | undefined;
-    let clientKey: Buffer | undefined;
-
-    if (isTls && this.options.tls) {
-      if (this.options.tls.caCertPath && fs.existsSync(this.options.tls.caCertPath)) {
-        caCert = fs.readFileSync(this.options.tls.caCertPath);
-      }
-      if (this.options.tls.clientCertPath && fs.existsSync(this.options.tls.clientCertPath)) {
-        clientCert = fs.readFileSync(this.options.tls.clientCertPath);
-      }
-      if (this.options.tls.clientKeyPath && fs.existsSync(this.options.tls.clientKeyPath)) {
-        clientKey = fs.readFileSync(this.options.tls.clientKeyPath);
-      }
+  /**
+   * Builds a dedicated HTTPS agent with CA/client mTLS credentials and default
+   * strict certificate validation (`rejectUnauthorized: true`) when TLS is enabled.
+   */
+  private createTlsAgent(): https.Agent | undefined {
+    const tls = this.options.tls;
+    if (!tls) {
+      return undefined;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      const clientModule = isTls ? https : http;
-      const req = clientModule.request(
-        {
-          hostname: "127.0.0.1",
-          port: this.clientPort,
-          path: "/v3/kv/compaction",
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          ca: caCert,
-          cert: clientCert,
-          key: clientKey,
-          rejectUnauthorized: false,
-        },
-        (res) => {
-          let body = "";
-          res.on("data", (chunk) => { body += chunk; });
-          res.on("end", () => {
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              resolve();
-            } else {
-              reject(new Error(`Compaction failed with status ${res.statusCode}: ${body}`));
-            }
-          });
-        }
-      );
+    const ca =
+      tls.caCertPath && fs.existsSync(tls.caCertPath)
+        ? fs.readFileSync(tls.caCertPath)
+        : undefined;
+    const cert =
+      tls.clientCertPath && fs.existsSync(tls.clientCertPath)
+        ? fs.readFileSync(tls.clientCertPath)
+        : undefined;
+    const key =
+      tls.clientKeyPath && fs.existsSync(tls.clientKeyPath)
+        ? fs.readFileSync(tls.clientKeyPath)
+        : undefined;
 
-      req.on("error", reject);
-      req.write(JSON.stringify({ revision: Number(revision), physical: true }));
-      req.end();
-    });
+    return new https.Agent({ ca, cert, key, keepAlive: false });
+  }
+
+  public async compact(revision: bigint): Promise<void> {
+    const agent = this.createTlsAgent();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const clientModule = agent ? https : http;
+        const req = clientModule.request(
+          {
+            hostname: "127.0.0.1",
+            port: this.clientPort,
+            path: "/v3/kv/compaction",
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            agent,
+          },
+          (res) => {
+            let body = "";
+            res.on("data", (chunk) => { body += chunk; });
+            res.on("end", () => {
+              if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                resolve();
+              } else {
+                reject(new Error(`Compaction failed with status ${res.statusCode}: ${body}`));
+              }
+            });
+          }
+        );
+
+        req.on("error", reject);
+        req.write(JSON.stringify({ revision: Number(revision), physical: true }));
+        req.end();
+      });
+    } finally {
+      agent?.destroy();
+    }
   }
 
   private async waitForReady(timeoutMs: number): Promise<void> {
     const startTime = Date.now();
-    const isTls = Boolean(this.options.tls);
+    const agent = this.createTlsAgent();
 
-    let caCert: Buffer | undefined;
-    let clientCert: Buffer | undefined;
-    let clientKey: Buffer | undefined;
+    try {
+      while (Date.now() - startTime < timeoutMs) {
+        try {
+          const ok = await new Promise<boolean>((resolve) => {
+            const checkOptions: https.RequestOptions = {
+              hostname: "127.0.0.1",
+              port: this.clientPort,
+              path: "/health",
+              method: "GET",
+              timeout: 500,
+              agent,
+            };
 
-    if (isTls && this.options.tls) {
-      if (this.options.tls.caCertPath && fs.existsSync(this.options.tls.caCertPath)) {
-        caCert = fs.readFileSync(this.options.tls.caCertPath);
-      }
-      if (this.options.tls.clientCertPath && fs.existsSync(this.options.tls.clientCertPath)) {
-        clientCert = fs.readFileSync(this.options.tls.clientCertPath);
-      }
-      if (this.options.tls.clientKeyPath && fs.existsSync(this.options.tls.clientKeyPath)) {
-        clientKey = fs.readFileSync(this.options.tls.clientKeyPath);
-      }
-    }
-
-    while (Date.now() - startTime < timeoutMs) {
-      try {
-        const ok = await new Promise<boolean>((resolve) => {
-          const checkOptions = {
-            hostname: "127.0.0.1",
-            port: this.clientPort,
-            path: "/health",
-            method: "GET",
-            timeout: 500,
-            ca: caCert,
-            cert: clientCert,
-            key: clientKey,
-            rejectUnauthorized: false,
-          };
-
-          const clientModule = isTls ? https : http;
-          const req = clientModule.request(checkOptions, (res) => {
-            let data = "";
-            res.on("data", (chunk) => { data += chunk; });
-            res.on("end", () => {
-              try {
-                const parsed = JSON.parse(data);
-                resolve(res.statusCode === 200 && parsed.health === "true");
-              } catch {
-                resolve(res.statusCode === 200);
-              }
+            const clientModule = agent ? https : http;
+            const req = clientModule.request(checkOptions, (res) => {
+              let data = "";
+              res.on("data", (chunk) => { data += chunk; });
+              res.on("end", () => {
+                try {
+                  const parsed = JSON.parse(data);
+                  resolve(res.statusCode === 200 && parsed.health === "true");
+                } catch {
+                  resolve(res.statusCode === 200);
+                }
+              });
             });
+
+            req.on("error", () => resolve(false));
+            req.on("timeout", () => {
+              req.destroy();
+              resolve(false);
+            });
+            req.end();
           });
 
-          req.on("error", () => resolve(false));
-          req.on("timeout", () => {
-            req.destroy();
-            resolve(false);
-          });
-          req.end();
-        });
-
-        if (ok) {
-          return;
+          if (ok) {
+            return;
+          }
+        } catch {
+          // Retry
         }
-      } catch {
-        // Retry
+        if (this.exitInfo) {
+          throw new Error(
+            `etcd instance ${this.name} exited before becoming ready (${this.exitInfo}).\nstderr:\n${this.stderrTail}\nstdout:\n${this.stdoutTail}`
+          );
+        }
+        await new Promise((r) => setTimeout(r, 100));
       }
-      if (this.exitInfo) {
-        throw new Error(
-          `etcd instance ${this.name} exited before becoming ready (${this.exitInfo}).\nstderr:\n${this.stderrTail}\nstdout:\n${this.stdoutTail}`
-        );
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
 
-    throw new Error(
-      `etcd instance ${this.name} failed to reach ready state within ${timeoutMs}ms.\nstderr:\n${this.stderrTail}\nstdout:\n${this.stdoutTail}`
-    );
+      throw new Error(
+        `etcd instance ${this.name} failed to reach ready state within ${timeoutMs}ms.\nstderr:\n${this.stderrTail}\nstdout:\n${this.stdoutTail}`
+      );
+    } finally {
+      agent?.destroy();
+    }
   }
 }
