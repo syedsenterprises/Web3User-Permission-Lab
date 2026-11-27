@@ -50,47 +50,48 @@
 <link rel="stylesheet" href="css/demo.css">
 <style>
 :root{color-scheme:dark;--bg:#0b1220;--panel:#111d30;--line:#263752;--text:#eef4ff;--muted:#a7b6cc;--cyan:#71e2d0;--blue:#89b4ff;--gold:#ffd48a;--green:#7ce38b}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#182a45 0,transparent 45%),var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
-a{color:var(--cyan)}.wrap{width:min(1100px,calc(100% - 36px));margin:auto}.nav{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 0;border-bottom:1px solid var(--line)}.brand{font-weight:750;letter-spacing:.2px}.pill{font-size:.78rem;color:var(--gold);border:1px solid #735a2b;background:#332a19;padding:5px 10px;border-radius:999px}
-.hero{padding:76px 0 44px;max-width:880px}.eyebrow{color:var(--cyan);font-weight:700;text-transform:uppercase;letter-spacing:2px;font-size:.78rem}.hero h1{font-size:clamp(2.5rem,6vw,4.5rem);line-height:1.08;letter-spacing:-.04em;margin:15px 0 22px}.hero p{color:var(--muted);font-size:1.12rem;max-width:780px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}.btn{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:11px 16px;font-weight:700}.btn.primary{background:var(--cyan);color:#07151b;border-color:var(--cyan)}.btn:hover{filter:brightness(1.08)}
-.notice{border:1px solid #735a2b;background:#211e19;border-radius:14px;padding:18px 20px;color:#ffe5b4;margin:8px 0 36px}.notice strong{color:#fff}
+*{box-sizing:border-box}html,body{overflow-x:clip}body{margin:0;background:radial-gradient(ellipse at 15% 0%,#182a45 0,transparent 45%),var(--bg);color:var(--text);font:16px/1.65 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+h1,h2,h3,h4{text-wrap:balance}p{text-wrap:pretty}main p{max-width:65ch}
+a{color:var(--cyan)}.wrap{width:min(1200px,calc(100% - 36px));margin:auto}.nav{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 0;border-bottom:1px solid var(--line)}.brand{font-weight:700;letter-spacing:.2px}.pill{font-size:.78rem;color:var(--gold);border:1px solid #735a2b;background:#332a19;padding:5px 10px;border-radius:999px}
+.hero{padding:130px 0 120px;max-width:880px}.eyebrow{color:var(--cyan);font-weight:700;font-size:.875rem}.hero h1{font-size:clamp(2.5rem,6vw,5rem);line-height:1.08;letter-spacing:-.04em;margin:15px 0 22px}.hero p{color:var(--muted);font-size:1.12rem;max-width:65ch}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}.btn{display:inline-block;text-decoration:none;border:1px solid var(--line);border-radius:10px;padding:11px 16px;font-weight:700}.btn.primary{background:var(--cyan);color:#07151b;border-color:var(--cyan)}.btn:hover{filter:brightness(1.08)}
+.notice{border:1px solid #735a2b;background:#211e19;border-radius:14px;padding:20px 28px;color:#ffe5b4;margin:16px 0 60px;font-size:1.02rem}.notice strong{color:#fff}
 .checkpoint-box{background:linear-gradient(145deg,#13233d,#0e192c);border:1px solid #2e4366;border-radius:16px;padding:24px;margin-bottom:44px}
 .checkpoint-header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:10px;border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:18px}
-.checkpoint-title{font-size:1.35rem;font-weight:750;color:#fff}
+.checkpoint-title{font-size:1.35rem;font-weight:700;color:#fff}
 .checkpoint-tag{font-size:.82rem;font-weight:700;padding:4px 10px;border-radius:6px;background:#183626;color:var(--green);border:1px solid #2e6244}
-.checkpoint-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.checkpoint-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(250px,100%),1fr));gap:16px}
 .stat-item{background:#0d1626;border:1px solid var(--line);border-radius:10px;padding:14px 16px}
-.stat-label{font-size:.78rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:4px}
+.stat-label{font-size:.78rem;color:var(--muted);margin-bottom:4px}
 .stat-val{font-size:1.02rem;color:var(--text);font-weight:600}
-.stat-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88rem;color:var(--cyan)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:20px 0 44px}
+.stat-code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88rem;color:var(--cyan);overflow-wrap:anywhere;word-break:break-all}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr));gap:16px;margin:20px 0 44px}
 .card{background:linear-gradient(145deg,#132139,#101a2c);border:1px solid var(--line);border-radius:16px;padding:22px}
 .card h3{margin:0 0 10px;font-size:1.15rem;color:#fff}.card p{margin:0;color:var(--muted);font-size:.95rem}
-section{padding:16px 0}h2{font-size:1.8rem;letter-spacing:-.02em;margin-bottom:8px}.muted{color:var(--muted)}
-.status{display:inline-block;font-size:.74rem;font-weight:750;padding:3px 8px;border-radius:6px;background:#123c38;color:#9bf0df}
+section{padding:60px 0}h2{font-size:clamp(2rem,3.6vw,3.25rem);letter-spacing:-.02em;margin-bottom:8px}.muted{color:var(--muted)}
+.docs-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:12px;list-style:none;padding:0;margin:18px 0 0}
+.docs-list li{border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:#101a2a}
+.status{display:inline-block;font-size:.74rem;font-weight:700;padding:3px 8px;border-radius:6px;background:#123c38;color:#9bf0df}
 .planned{background:#2b2a38;color:#c9c6ff}.current{background:#352c16;color:var(--gold);border:1px solid #735a2b}
 .roadmap{display:grid;gap:12px;margin-top:18px}
 .milestone{display:grid;grid-template-columns:85px 1fr auto;gap:14px;align-items:start;padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:#101a2a}
-.milestone p{margin:4px 0 0;color:var(--muted);font-size:.92rem}.id{color:var(--blue);font-weight:800}
-footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
+.milestone p{margin:4px 0 0;color:var(--muted);font-size:.92rem}.id{color:var(--blue);font-weight:700}
+footer{margin-top:60px;padding:25px 0 35px;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
+footer a{white-space:nowrap}
 @media(max-width:650px){.hero{padding-top:42px}.milestone{grid-template-columns:1fr;gap:8px}.milestone .status{justify-self:start}.nav{align-items:flex-start;flex-direction:column}}
 </style>
 </head>
 <body>
 <header class="wrap nav">
   <div class="brand">&#9672; Web3User Permission Lab</div>
-  <span class="pill">ENGINEERING STATUS &middot; 24 NOV 2026</span>
+  <span class="pill">Engineering status &middot; 24 Nov 2026</span>
 </header>
 <main class="wrap">
 <section class="hero">
-  <div class="eyebrow">Enterprise Off-Chain Permission &amp; Authorization Governance for Web3</div>
   <h1>Make transaction rules easier to inspect, test, and reason about.</h1>
-  <p>Web3User Permission Lab is an off-chain transaction authorization and governance SDK for Node.js. Its architecture has advanced from the core ERC-20 policy evaluator into persistent authorization governance, cumulative budgets, monotonic witness infrastructure, hardware-backed Cloud KMS signing (AWS KMS &amp; GCP Cloud KMS), and a verified pure state machine reducer for distributed consensus. The current public site remains an informational static preview: it is not a hosted authorization API, production wallet, transaction broadcaster, or production security service.</p>
+  <p>Web3User Permission Lab is an off-chain transaction authorization and governance SDK for Node.js.</p>
   <div class="actions">
     <a class="btn primary" href="#demo">Interactive Policy Playground</a>
     <a class="btn" href="assets/web3user-engineering-roadmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer">Read engineering roadmap</a>
-    <a class="btn" href="assets/web3user-project-mindmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer">Open project mindmap</a>
-    <a class="btn" href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Read technical white paper (v0.3.0)</a>
   </div>
 </section>
 
@@ -102,7 +103,7 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
   <div class="checkpoint-box">
     <div class="checkpoint-header">
       <div class="checkpoint-title">Current Engineering Snapshot &mdash; Milestone 13-D &amp; FN-SEC-01</div>
-      <span class="checkpoint-tag">DEVELOPMENT BRANCH · 780/780 TESTS PASSING</span>
+      <span class="checkpoint-tag">Development branch &middot; 780/780 tests passing</span>
     </div>
     <div class="checkpoint-grid">
       <div class="stat-item">
@@ -134,27 +135,27 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
   <div class="grid">
     <article class="card">
       <h3>Hardware-Backed Cloud KMS/HSM Signing</h3>
-      <p>Production signer adapters for AWS KMS and GCP Cloud KMS with full DER-to-raw RFC 8410 64-byte Ed25519 signature normalization, algorithm contract enforcement, and factory resolution.</p>
+      <p>Production signer adapters for AWS KMS and GCP Cloud KMS, with DER-to-raw RFC 8410 Ed25519 normalization, algorithm contract enforcement and factory resolution.</p>
     </article>
     <article class="card">
       <h3>Deterministic Consensus State Reducer</h3>
-      <p>Pure state machine reducer governing distributed consensus log events with 11 action types, single-slot idempotency, atomic epoch transitions, and strict monotonic index enforcement.</p>
+      <p>Pure state machine reducer for distributed consensus log events: 11 action types, single-slot idempotency, atomic epoch transitions, strict monotonic index enforcement.</p>
     </article>
     <article class="card">
       <h3>Multi-Process Race &amp; Replay Prevention</h3>
-      <p>Deterministic IPC rendezvous barriers release competing OS processes simultaneously to attempt consuming the same V3 authorization; tests strictly enforce exactly one ALLOW and three domain-level DENY outcomes with one persistent record.</p>
+      <p>Deterministic IPC rendezvous barriers release competing processes simultaneously to consume the same V3 authorization; tests enforce exactly one ALLOW and three domain-level DENY outcomes, with one persistent record.</p>
     </article>
     <article class="card">
       <h3>Transaction Rollback &amp; Contention Retries</h3>
-      <p>Immediate SQLite write transactions (<code>BEGIN IMMEDIATE;</code>) roll back partial writes and intermediate clock updates on failure. Bounded retry loops with non-spinning sleep resolve transient contention or fail closed predictably.</p>
+      <p>Immediate SQLite write transactions (<code>BEGIN IMMEDIATE;</code>) roll back partial writes and clock updates on failure. Bounded retry loops with non-spinning sleep resolve transient contention or fail closed.</p>
     </article>
     <article class="card">
       <h3>Authorization &amp; Signing-Key Boundaries</h3>
-      <p>Rigorous boundary tests enforce strict rejection at the exact expiration second (<code>nowSeconds &gt;= expiresAtSeconds</code>), clip expiry to authoritative policy/key caps, and enforce key validity windows and post-retirement forgery rejection.</p>
+      <p>Boundary tests enforce rejection at the exact expiration second (<code>nowSeconds &gt;= expiresAtSeconds</code>), clip expiry to policy/key caps, and enforce key validity windows and post-retirement forgery rejection.</p>
     </article>
     <article class="card">
       <h3>Monotonic Clock &amp; Replay Protection</h3>
-      <p>ClockGuard monotonic time anchoring prevents time-travel attacks. Monotonic clock high-water marks, policy revisions, key governance states, and SQLite WAL schemas survive restarts without corruption.</p>
+      <p>ClockGuard monotonic time anchoring prevents time-travel attacks. Clock high-water marks, policy revisions, key governance states and SQLite WAL schemas survive restarts without corruption.</p>
     </article>
   </div>
 </section>
@@ -188,42 +189,42 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
     <div class="milestone">
       <div class="id">M0&ndash;M8</div>
       <div><strong>Policy Engine, Cryptographic Authorization, Persistence &amp; Budgets</strong><p>ERC-20 evaluation, canonical binding, Ed25519 V3 artifacts, SQLite WAL replay protection, governance, cumulative budgets, and hardening.</p></div>
-      <span class="status">IMPLEMENTED</span>
+      <span class="status">Implemented</span>
     </div>
     <div class="milestone">
       <div class="id">M9&ndash;M10</div>
       <div><strong>Adversarial Security &amp; Disaster-Recovery Hardening</strong><p>Budget hardening, lock-hold optimization, adversarial concurrency, and recovery design work represented in milestone history.</p></div>
-      <span class="status">COMMITTED</span>
+      <span class="status">Committed</span>
     </div>
     <div class="milestone">
       <div class="id">M11&ndash;M13-C</div>
       <div><strong>Monotonic Witness, Reconciliation Pipeline &amp; Lifecycle</strong><p>Monotonic witness adapter, fail-closed recovery, bounded reconciliation pipeline, and startup synchronization remediation.</p></div>
-      <span class="status">COMMITTED</span>
+      <span class="status">Committed</span>
     </div>
     <div class="milestone">
       <div class="id">FN-SEC-01</div>
       <div><strong>Hardware-Backed Signing Adapters (AWS KMS &amp; GCP Cloud KMS)</strong><p>Production AWS KMS and GCP Cloud KMS signer adapters, RFC 8410 DER signature normalization, mock contract tests, and SignerFactory.</p></div>
-      <span class="status">ACCEPTED</span>
+      <span class="status">Accepted</span>
     </div>
     <div class="milestone">
       <div class="id">M13-D 2-B.1</div>
       <div><strong>Consensus Pure State Machine Reducer</strong><p>Deterministic reducer for etcd consensus log events, 11 action types, single-slot idempotency, atomic epoch transitions, and monotonic indexing.</p></div>
-      <span class="status">ACCEPTED</span>
+      <span class="status">Accepted</span>
     </div>
     <div class="milestone">
       <div class="id">M13-D 2-B.2</div>
       <div><strong>Historical Retention, Snapshots &amp; Compaction</strong><p>Architectural decisions (ADR-010 to ADR-016), FCR-01 through FCR-07 reviews, and implementation plan finalized.</p></div>
-      <span class="status current">PLANNED</span>
+      <span class="status current">Planned</span>
     </div>
     <div class="milestone">
       <div class="id">Stage 3-A</div>
       <div><strong>Multi-Node Raft / Consensus Cluster</strong><p>Multi-node consensus deployment, partition tolerance, and cluster failover verification.</p></div>
-      <span class="status planned">PLANNED</span>
+      <span class="status planned">Planned</span>
     </div>
     <div class="milestone">
       <div class="id">NEXT</div>
       <div><strong>Production Readiness Gates</strong><p>Revocation freshness, live KMS cloud deployment, air-gapped backup keys, cross-store restore, measured RPO/RTO, and independent commercial audit.</p></div>
-      <span class="status planned">BLOCKED</span>
+      <span class="status planned">Blocked</span>
     </div>
   </div>
 </section>
@@ -233,29 +234,29 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
   <div class="grid">
     <article class="card">
       <h3>Revocation Freshness</h3>
-      <p>The 30-second fail-closed freshness gate still needs reliable background synchronization and integration validation.</p>
+      <p>The 30-second fail-closed freshness gate still needs background synchronization and integration validation.</p>
     </article>
     <article class="card">
       <h3>Receipt Canonicalization</h3>
-      <p>gRPC and Engine currently use incompatible signing-preimage formats. A shared canonical format and verification tests are required.</p>
+      <p>gRPC and Engine use incompatible signing-preimage formats. A shared canonical format and verification tests are required.</p>
     </article>
     <article class="card">
       <h3>Live Cloud KMS Deployment</h3>
-      <p>While the KMS signing adapters and contract tests are accepted, production deployment with live cloud infrastructure credentials remains to be provisioned.</p>
+      <p>KMS signing adapters and contract tests are accepted, but production deployment with live cloud credentials remains to be provisioned.</p>
     </article>
     <article class="card">
       <h3>Offline Recovery &amp; Restore</h3>
-      <p>Air-gapped backup-key custody, cross-store PostgreSQL / etcd / SQLite recovery, and measured RPO/RTO drills are not complete.</p>
+      <p>Air-gapped backup-key custody, cross-store recovery and measured RPO/RTO drills are not complete.</p>
     </article>
   </div>
-  <p class="muted">The current PostgreSQL-backed witness path remains the live authority / single point of failure. Do not interpret the committed consensus foundation as proof that etcd is already the live authorization path. No independent commercial security audit has been completed.</p>
+  <p class="muted">The PostgreSQL-backed witness path remains the live authority and single point of failure — not etcd. No independent commercial security audit has been completed.</p>
 </section>
 
 <section class="demo-section" id="demo">
   <div class="demo-header">
     <div class="eyebrow">Interactive Demonstration &middot; Client-Side Policy Evaluator</div>
     <h2>Interactive Policy Evaluator Playground</h2>
-    <p>Test real-time off-chain authorization decisions against custom policies and transaction requests. The evaluation logic below executes natively in your browser using pure TypeScript/JavaScript equivalent to <code>src/policy.ts</code>.</p>
+    <p>Test off-chain authorization decisions against custom policies and transaction requests, evaluated natively in your browser with TypeScript/JavaScript equivalent to <code>src/policy.ts</code>.</p>
   </div>
 
   <div class="demo-presets-wrapper">
@@ -385,7 +386,7 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
         <h4>Copyable Node.js TypeScript Integration</h4>
         <div>
           <span id="copy-feedback" style="color:var(--green);font-size:0.8rem;margin-right:8px;font-weight:600;"></span>
-          <button type="button" id="btn-copy-code" class="btn-copy">Copy TypeScript Code</button>
+          <button type="button" id="btn-copy-code" class="btn-copy">Copy code</button>
         </div>
       </div>
       <pre class="code-pre"><code id="demo-ts-code"></code></pre>
@@ -394,21 +395,41 @@ footer{margin-top:50px;padding:25px 0 35px;border-top:1px solid var(--line);colo
     <!-- Architecture Boundary Notice -->
     <div class="arch-boundary-box">
       <h4>Architectural Boundary Notice</h4>
-      <p><strong>What is running in your browser:</strong> The policy evaluation, cumulative window budget checks, ERC-20 transfer calldata decoding, parameter normalization, and rule checks shown above run 100% client-side in pure JavaScript. No data is transmitted to an external server.</p>
-      <p style="margin-top:8px;"><strong>What requires Node.js runtime:</strong> Full cryptographic Ed25519 authorization signing, monotonic ClockGuard anchoring, persistent single-use replay protection, and multi-process atomic budget accumulators require the Node.js SDK (<code>Web3UserEngine</code>) with built-in SQLite WAL mode. To test multi-process replay attacks and persistent locking on your machine, run <code>npm run demo:persistent-replay</code>.</p>
+      <p><strong>What is running in your browser:</strong> Policy evaluation, budget checks, calldata decoding and rule checks — 100% client-side in pure JavaScript. No data leaves your browser.</p>
+      <p style="margin-top:8px;"><strong>What requires Node.js runtime:</strong> Ed25519 signing, ClockGuard anchoring, persistent replay protection and atomic budget accumulators need the Node.js SDK (<code>Web3UserEngine</code>) with SQLite WAL mode. To test multi-process replay attacks on your machine, run <code>npm run demo:persistent-replay</code>.</p>
     </div>
   </div>
 </section>
 
 <section>
   <h2>Technical Snapshot</h2>
-  <p class="muted">Language: TypeScript &middot; Tooling: Node.js (&gt;=22.13.0), npm, Vitest &middot; Storage: SQLite (built-in node:sqlite, WAL mode) &middot; Signatures: Ed25519 (node:crypto) &middot; Version Control: Git &amp; GitHub.</p>
-  <p class="muted">Current supported selector: <code>0xa9059cbb</code> &mdash; ERC-20 <code>transfer(address,uint256)</code>. The prototype enforces single-use persistent replay protection and atomic cumulative budgets over fixed UTC hourly and daily windows. Arbitrary smart contract parsing and universal wallet enforcement boundaries are not implemented.</p>
+  <div class="checkpoint-grid">
+    <div class="stat-item">
+      <div class="stat-label">Language</div>
+      <div class="stat-val">TypeScript</div>
+      <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Node.js (&ge;22.13.0), npm, Vitest</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">Storage</div>
+      <div class="stat-val">SQLite, WAL mode</div>
+      <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Built-in node:sqlite</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">Signatures</div>
+      <div class="stat-val">Ed25519</div>
+      <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">node:crypto</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">Version control</div>
+      <div class="stat-val">Git &amp; GitHub</div>
+    </div>
+  </div>
+  <p class="muted">Supported selector: <code>0xa9059cbb</code> &mdash; ERC-20 <code>transfer(address,uint256)</code>, with single-use replay protection and atomic cumulative budgets over fixed UTC hourly and daily windows. Arbitrary contract parsing and universal wallet enforcement are not implemented.</p>
 </section>
 
 <section>
   <h2>Project Documents</h2>
-  <ul>
+  <ul class="docs-list">
     <li><a href="assets/web3user-engineering-roadmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer"><strong>Engineering status &amp; roadmap (PDF)</strong></a> &mdash; Updated 03 November 2026</li>
     <li><a href="assets/web3user-project-mindmap-2026-11-03.pdf" target="_blank" rel="noopener noreferrer"><strong>System mindmap &amp; architectural tree (PDF)</strong></a> &mdash; Updated 03 November 2026</li>
     <li><a href="assets/web3user-whitepaper-v0.3.0.pdf" target="_blank" rel="noopener noreferrer">Technical white paper &mdash; v0.3.0 (PDF)</a> &mdash; Historical Milestone 6.4 draft (23 October 2026)</li>
