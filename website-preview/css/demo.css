@@ -6,9 +6,9 @@
  */
 
 .demo-section {
-  padding: 32px 0 48px;
+  padding: 60px 0 72px;
   border-top: 1px solid var(--line);
-  margin-top: 40px;
+  margin-top: 180px;
 }
 
 .demo-header {
@@ -16,7 +16,7 @@
 }
 
 .demo-header h2 {
-  font-size: 2rem;
+  font-size: clamp(2rem, 3.6vw, 3.25rem);
   letter-spacing: -0.03em;
   margin: 0 0 10px;
   color: #fff;
@@ -26,7 +26,7 @@
   color: var(--muted);
   font-size: 1.05rem;
   margin: 0;
-  max-width: 850px;
+  max-width: 65ch;
 }
 
 /* Presets Bar */
@@ -40,8 +40,6 @@
 
 .presets-label {
   font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 1px;
   color: var(--cyan);
   font-weight: 700;
   margin-bottom: 12px;
@@ -57,7 +55,9 @@
   background: #142238;
   border: 1px solid #283e60;
   color: var(--text);
-  padding: 10px 12px;
+  padding: 8px 12px;
+  min-height: 44px;
+  max-height: 52px;
   border-radius: 8px;
   font-family: inherit;
   font-size: 0.86rem;
@@ -67,7 +67,7 @@
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  transition: all 0.15s ease-in-out;
+  transition: background-color 0.15s ease-in-out, border-color 0.15s ease-in-out, transform 0.15s ease-in-out;
   text-align: left;
 }
 
@@ -88,12 +88,18 @@
   box-shadow: 0 0 0 1px var(--cyan);
 }
 
+.preset-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
 .preset-tag {
   font-size: 0.7rem;
-  font-weight: 800;
+  font-weight: 700;
   padding: 2px 6px;
   border-radius: 4px;
-  letter-spacing: 0.5px;
 }
 
 .preset-tag.allow {
@@ -120,13 +126,13 @@
   border-top: 1px dashed var(--line);
   color: #ffd48a;
   font-size: 0.88rem;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 /* Two-column layout for forms */
 .demo-workspace {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr));
   gap: 20px;
   margin-bottom: 24px;
 }
@@ -152,8 +158,6 @@
   font-size: 0.74rem;
   font-weight: 600;
   color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .form-group {
@@ -171,12 +175,12 @@
 .form-control {
   width: 100%;
   background: #09101d;
-  border: 1px solid #22344f;
+  border: 1px solid #57779f;
   border-radius: 6px;
   color: var(--text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85rem;
-  padding: 8px 10px;
+  padding: 12px 10px;
   box-sizing: border-box;
   transition: border-color 0.15s ease;
 }
@@ -223,7 +227,7 @@
   background: #15263d;
   border: 1px solid #2b4366;
   color: var(--cyan);
-  padding: 4px 8px;
+  padding: 14px 10px;
   border-radius: 4px;
   font-size: 0.75rem;
   font-weight: 600;
@@ -246,7 +250,7 @@
   padding: 20px 24px;
   margin-bottom: 20px;
   border: 1px solid var(--line);
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
 .decision-banner.status-allow {
@@ -273,8 +277,7 @@
 
 .decision-badge {
   font-size: 1.15rem;
-  font-weight: 850;
-  letter-spacing: 1px;
+  font-weight: 700;
   padding: 6px 16px;
   border-radius: 8px;
   display: inline-block;
@@ -326,8 +329,6 @@
 
 .checklist-title {
   font-size: 0.9rem;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
   color: var(--muted);
   font-weight: 700;
   margin: 0 0 14px;
@@ -338,8 +339,14 @@
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: 10px;
+}
+
+@media (min-width: 1100px) {
+  .checklist {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 .check-item {
@@ -385,8 +392,6 @@
 .inspector-title {
   font-size: 0.88rem;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
   color: var(--cyan);
   margin-bottom: 10px;
 }
@@ -429,6 +434,7 @@
   margin-top: 10px;
   font-size: 0.84rem;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .calldata-decoded-info code {
@@ -447,6 +453,8 @@
 
 .code-header {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 12px;
@@ -464,11 +472,12 @@
   border: 1px solid #2d456b;
   color: var(--cyan);
   border-radius: 6px;
-  padding: 6px 12px;
+  padding: 14px 12px;
   font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
 .btn-copy:hover {
@@ -481,12 +490,11 @@
   border: 1px solid #16243a;
   border-radius: 8px;
   padding: 14px 16px;
-  overflow-x: auto;
+  overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.82rem;
   color: #d1dcfa;
   margin: 0;
-  max-height: 380px;
 }
 
 /* Architecture Boundary Notice */
