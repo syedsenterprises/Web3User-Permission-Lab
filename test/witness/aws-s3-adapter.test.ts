@@ -8,6 +8,7 @@ import {
 } from "@aws-sdk/client-s3";
 import {
   AwsS3ObjectStorageAdapter,
+  type AwsS3AdapterConfig,
   type S3ClientLike,
 } from "../../src/witness/aws-s3-adapter.js";
 import {
@@ -956,5 +957,45 @@ describe("Milestone 13-D Stage 2-B.3 Phase 1: AwsS3ObjectStorageAdapter", () => 
       addSpy.mockRestore();
       removeSpy.mockRestore();
     }
+  });
+
+  it("rejects caller-supplied static credentials and preserves default SDK provider-chain + clientOverride", async () => {
+    const fakeSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const unsafeConfig: AwsS3AdapterConfig = {
+      bucket: "b",
+      region: "us-east-1",
+      // @ts-expect-error AwsS3AdapterConfig must not accept static credentials overrides
+      credentials: { accessKeyId: "AKIAIOSFODNN7EXAMPLE", secretAccessKey: fakeSecret },
+    };
+
+    let thrownMessage = "";
+    try {
+      new AwsS3ObjectStorageAdapter(unsafeConfig);
+    } catch (err) {
+      expect(err).toBeInstanceOf(SnapshotError);
+      expect((err as SnapshotError).code).toBe("INVALID_CONFIGURATION");
+      thrownMessage = (err as Error).message;
+    }
+    expect(thrownMessage).toContain("default credential provider chain");
+    expect(thrownMessage).not.toContain(fakeSecret);
+    expect(thrownMessage).not.toContain("AKIAIOSFODNN7EXAMPLE");
+
+    // Normal SDK provider-chain construction (no credentials field, no clientOverride) remains supported
+    const defaultChainAdapter = new AwsS3ObjectStorageAdapter({
+      bucket: "b",
+      region: "us-east-1",
+      endpoint: "http://127.0.0.1:9",
+      forcePathStyle: true,
+    });
+    expect(defaultChainAdapter).toBeInstanceOf(AwsS3ObjectStorageAdapter);
+
+    // clientOverride remains functional
+    const sendMock = vi.fn(async () => ({ $metadata: { httpStatusCode: 200 } }));
+    const overrideAdapter = new AwsS3ObjectStorageAdapter(
+      { bucket: "b", region: "us-east-1" },
+      { send: sendMock as unknown as S3ClientLike["send"] }
+    );
+    await overrideAdapter.deleteObject("snapshots/cred-check.snap");
+    expect(sendMock).toHaveBeenCalledTimes(1);
   });
 });

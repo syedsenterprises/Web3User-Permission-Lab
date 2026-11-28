@@ -18,7 +18,6 @@ import {
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
-  type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import {
   type S3ObjectStorageAdapter,
@@ -28,6 +27,12 @@ import {
 
 export type S3ClientLike = Pick<S3Client, "send">;
 
+/**
+ * Configuration for `AwsS3ObjectStorageAdapter`.
+ * Authentication relies exclusively on the AWS SDK v3 default credential provider chain
+ * (environment variables, shared config/credentials files, IAM/ECS/EC2 roles, web identity).
+ * Caller-supplied static `credentials` overrides are intentionally omitted.
+ */
 export interface AwsS3AdapterConfig {
   readonly bucket: string;
   readonly region: string;
@@ -37,7 +42,6 @@ export interface AwsS3AdapterConfig {
   readonly retryBaseDelayMs?: number;
   readonly endpoint?: string;
   readonly forcePathStyle?: boolean;
-  readonly credentials?: S3ClientConfig["credentials"];
 }
 
 export const DEFAULT_S3_REQUEST_TIMEOUT_MS = 5_000;
@@ -276,6 +280,12 @@ export class AwsS3ObjectStorageAdapter implements S3ObjectStorageAdapter {
     if (!config.region || config.region.trim().length === 0) {
       throw new SnapshotError("Invalid AWS region: must be a non-empty string", "INVALID_CONFIGURATION");
     }
+    if ("credentials" in config && (config as Record<string, unknown>).credentials !== undefined) {
+      throw new SnapshotError(
+        "Static or caller-supplied credentials are not permitted; rely on the AWS SDK default credential provider chain",
+        "INVALID_CONFIGURATION"
+      );
+    }
 
     const timeoutMs = config.requestTimeoutMs ?? DEFAULT_S3_REQUEST_TIMEOUT_MS;
     if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
@@ -305,7 +315,6 @@ export class AwsS3ObjectStorageAdapter implements S3ObjectStorageAdapter {
         maxAttempts: 1, // Disable internal SDK retries; adapter enforces bounded retries & timeouts
         endpoint: config.endpoint,
         forcePathStyle: config.forcePathStyle,
-        credentials: config.credentials,
       });
   }
 
