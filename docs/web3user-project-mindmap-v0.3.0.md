@@ -128,12 +128,12 @@ WEB3USER PERMISSION LAB (Milestone 6.4)
 
 ---
 
-## Verified Status Sync (28 November 2026)
+## Verified Status Sync (28 November 2026 — Post-PR #9 Merge)
 
 > Historical M6.4 diagram above is preserved intact. Current verified repository and deployment state as of 28 November 2026:
 
-- **Active Development Branch:** `feature/m13-d-stage-2b3-multinode` (synced with `origin`; merged with `origin/main` at `a37518c`).
-- **`main` Branch:** `a37518c05050acd08074948147d591b6ca0c7cb3` (`CI` run `46075135593` & `CodeQL Advanced` run `46075135555` both `success`).
-- **Verified Test Suite (`npx vitest run`):** `54` test files passed, `984` tests passed, `6` skipped (env-gated live AWS S3 tests), `0` failures.
-- **Cloudflare Production Preview:** Worker `super-tree-7537` (version `be61dd25-32a9-4980-bfdd-7fc8b08e5130`) serving `https://web3user.tech` and `https://docs.web3user.tech`.
+- **`main` Branch:** `22f02e5715d0271ac273f2581e877ba98f01d029` (PR #9 merged from `feature/m13-d-stage-2b3-multinode`; Stage 2-B.3 `etcd` integration/test harness & AWS S3 adapter merged — test harness only, not a production multi-node Raft cluster).
+- **Post-Merge GitHub Actions (`22f02e5`):** `CI` (`46136413959`) and `CodeQL Advanced` (`46136413917`) both `completed / success`.
+- **Verified Test Suite (`npm test` on `main` `22f02e5`):** `54` test files passed, `985` tests passed, `6` skipped (env-gated live AWS S3 tests), `0` failures.
+- **Cloudflare Production Preview:** Worker `super-tree-7537` (version `be61dd25-32a9-4980-bfdd-7fc8b08e5130`, `2026-11-28T08:09:44Z`) serving `https://web3user.tech` and `https://docs.web3user.tech` (identical static HTML).
 - **Production Readiness:** `BLK-01` Closed (PR #2 merged); `BLK-02` through `BLK-12` remain Open (see `docs/web3user-engineering-roadmap-2026-11-03.md`).
