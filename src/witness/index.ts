@@ -46,5 +46,6 @@ export {
   computeKeyFingerprint,
 } from "./cloud-kms-signer.js";
 export * from "./aws-kms-signer.js";
+export * from "./aws-s3-adapter.js";
 export * from "./gcp-kms-signer.js";
 export * from "./signer-factory.js";

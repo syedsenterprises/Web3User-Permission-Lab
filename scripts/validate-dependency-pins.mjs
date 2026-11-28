@@ -37,6 +37,7 @@ const violations = [];
 // 1. Critical dependencies requiring strict exact version pinning (NO floating semver allowed)
 const EXACT_PINNED_DEPENDENCIES = {
   "@aws-sdk/client-kms": "3.1173.0",
+  "@aws-sdk/client-s3": "3.1173.0",
   "@google-cloud/kms": "6.3.0",
 };
 
