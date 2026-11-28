@@ -114,10 +114,12 @@ The project has progressed beyond the M6-era status currently published on the w
 
 ## Verified Synchronization & Blocker Ledger (28 November 2026 — Post-PR #9 Merge)
 
-- **Merged `main` State:** PR #9 (`feature/m13-d-stage-2b3-multinode`) merged into `main` at `22f02e5715d0271ac273f2581e877ba98f01d029` (`2026-11-28T10:42:06Z`).
-- **Latest Verified Full Suite (`npm test` on `main` `22f02e5`):** **54 test files passed; 985 tests passed; 6 skipped** (env-gated live AWS S3 tests in `test/witness/aws-s3-adapter.real.test.ts`); **0 failures**; `node scripts/ensure-etcd.mjs`, `node scripts/validate-dependency-pins.mjs`, `npx tsc --noEmit`, and `npm run build` exited `0`.
-- **Post-Merge GitHub Actions (`main` `22f02e5`):** `CI` (`46136413959` — `Linux container verification`, `Node 22.13.0`, `Node 24`, `Node 26`) and `CodeQL Advanced` (`46136413917` — `Analyze (actions)`, `Analyze (javascript-typescript)`) all `completed / success`.
-- **Cloudflare Deployment:** Worker `super-tree-7537` active version `be61dd25-32a9-4980-bfdd-7fc8b08e5130` (`2026-11-28T08:09:44Z`, pre-merge `d9ce687` snapshot) serving `https://web3user.tech` and `https://docs.web3user.tech` (both domains serve identical HTML from `website-preview/`).
+- **Merged `main` State:** PR #9 (`feature/m13-d-stage-2b3-multinode`) merged into `main` at `22f02e5715d0271ac273f2581e877ba98f01d029` (`2026-11-28T10:42:06Z`), followed by post-merge finalization commit `29c2a52924965bcd2a5398f045759b17d8bcd581` (founder name `Syed Shahed` verified across all `funding/application/` files; `website-preview/index.html` and `funding/application/` synchronized to `985 passed`).
+- **Latest Verified Full Suite (`npm test` on `main`):** **54 test files passed; 985 tests passed; 6 skipped** (env-gated live AWS S3 tests in `test/witness/aws-s3-adapter.real.test.ts`); **0 failures**; `node scripts/ensure-etcd.mjs`, `node scripts/validate-dependency-pins.mjs`, `npx tsc --noEmit`, and `npm run build` exited `0`.
+- **Post-Merge GitHub Actions (`main`):**
+  - Merge commit `22f02e5`: `CI` (`46136413959`) and `CodeQL Advanced` (`46136413917`) both `completed / success`.
+  - Finalization commit `29c2a52`: `CI` (`46145750844` — `Linux container verification`, `Node 22.13.0`, `Node 24`, `Node 26`) and `CodeQL Advanced` (`46145750873` — `Analyze (actions)`, `Analyze (javascript-typescript)`) all `completed / success`.
+- **Cloudflare Deployment:** Worker `super-tree-7537` active version `d5f784f7-4fbd-46e4-ad85-2440bcafd1be` (`100%` traffic, `2026-11-28T12:45:38.124Z`) serving `https://web3user.tech` and `https://docs.web3user.tech` (both domains serve identical HTML from `website-preview/`).
 - **Stage 2-B.2 & 2-B.3 Status:** Stage 2-B.2 merged on `main` (PR #2, `b0c6bf5`); Stage 2-B.3 multi-node `etcd` integration/test harness (`test/witness/helpers/real-etcd-cluster.ts`, `loopback-fault-proxy.ts`, `raft-compaction-reconciliation.real.test.ts`) and AWS S3 adapter (`src/witness/aws-s3-adapter.ts`, default SDK credential provider chain) merged on `main` in PR #9 (`22f02e5`). Note: Stage 2-B.3 is an `etcd` integration/test harness, **not** a production multi-node Raft cluster (`BLK-08` remains Open).
 
 ### 12 Production Blockers (`BLK-01`..`BLK-12`)

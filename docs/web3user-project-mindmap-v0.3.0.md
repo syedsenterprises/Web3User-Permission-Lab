@@ -132,8 +132,8 @@ WEB3USER PERMISSION LAB (Milestone 6.4)
 
 > Historical M6.4 diagram above is preserved intact. Current verified repository and deployment state as of 28 November 2026:
 
-- **`main` Branch:** `22f02e5715d0271ac273f2581e877ba98f01d029` (PR #9 merged from `feature/m13-d-stage-2b3-multinode`; Stage 2-B.3 `etcd` integration/test harness & AWS S3 adapter merged — test harness only, not a production multi-node Raft cluster).
-- **Post-Merge GitHub Actions (`22f02e5`):** `CI` (`46136413959`) and `CodeQL Advanced` (`46136413917`) both `completed / success`.
-- **Verified Test Suite (`npm test` on `main` `22f02e5`):** `54` test files passed, `985` tests passed, `6` skipped (env-gated live AWS S3 tests), `0` failures.
-- **Cloudflare Production Preview:** Worker `super-tree-7537` (version `be61dd25-32a9-4980-bfdd-7fc8b08e5130`, `2026-11-28T08:09:44Z`) serving `https://web3user.tech` and `https://docs.web3user.tech` (identical static HTML).
+- **`main` Branch:** `29c2a52924965bcd2a5398f045759b17d8bcd581` (post-merge finalization following PR #9 merge `22f02e5715d0271ac273f2581e877ba98f01d029`; founder name `Syed Shahed` verified across all `funding/application/` artifacts; Stage 2-B.3 `etcd` integration/test harness & AWS S3 adapter merged — test harness only, not a production multi-node Raft cluster).
+- **Post-Merge GitHub Actions (`29c2a52`):** `CI` (`46145750844`) and `CodeQL Advanced` (`46145750873`) both `completed / success`.
+- **Verified Test Suite (`npm test` on `main`):** `54` test files passed, `985` tests passed, `6` skipped (env-gated live AWS S3 tests), `0` failures.
+- **Cloudflare Production Preview:** Worker `super-tree-7537` (version `d5f784f7-4fbd-46e4-ad85-2440bcafd1be`, `100%` traffic, `2026-11-28T12:45:38.124Z`) serving `https://web3user.tech` and `https://docs.web3user.tech` (identical static HTML).
 - **Production Readiness:** `BLK-01` Closed (PR #2 merged); `BLK-02` through `BLK-12` remain Open (see `docs/web3user-engineering-roadmap-2026-11-03.md`).
