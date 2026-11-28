@@ -3,7 +3,7 @@
 **Project:** Web3User Permission Lab ([web3user.tech](https://web3user.tech))  
 **Founder:** Syed Shahed  
 **Organization / Entity:** Syed's Enterprises (Solo Venture &middot; [syedsenterprises.org](https://syedsenterprises.org/))  
-**Date:** 24 November 2026
+**Date:** 24 November 2026 (Updated 28 November 2026)
 
 ---
 
@@ -49,13 +49,13 @@ Fifth, a signed V3 authorization envelope is returned, verifiable off-chain agai
 - Pure Consensus Reducer: A verified in-memory state machine reducer handles 11 action types, single-slot idempotency, atomic epoch transitions, and monotonic indexing (Milestone 13-D Stage 2-B.1).
 - Durable Witness: PostgreSQL schemas and single-node etcd integration provide historical event tracking."*
 
-### Slide 7: Security & Validation — 806 Passing Tests Across 39 Files (5:50 – 6:50)
-*"Security requires rigorous, empirical proof. In our latest accepted milestone (13-D Stage 2-B.1.1), Web3User achieved a 100% pass rate in repository regression testing: exactly 806 tests passing across 39 test files with zero failures.
+### Slide 7: Security & Validation — 806 Historical · 984 Passed / 6 Skipped (PR #9) (5:50 – 6:50)
+*"Security requires rigorous, empirical proof. Building on our historical accepted milestone baseline of 806 passing tests across 39 test files (Stage 2-B.1.1), our latest PR #9 local regression suite achieved 984 passing tests across 54 test files with zero failures and 6 skipped environment-gated live AWS S3 integration tests. Passing tests do not constitute an independent security audit or proof of production readiness.
 This includes:
 - Multi-process OS concurrency tests using deterministic IPC rendezvous barriers, demonstrating that concurrent attempts to consume the same authorization result in exactly one ALLOW and deterministic DENYs.
 - Process-crash recovery tests confirming automatic SQLite WAL rollback upon uncommitted worker termination.
 - Milestone FN-SEC-01 Steps 1–4 independently audited and accepted, validating AWS and GCP Cloud KMS signer adapters against mock service contracts matching cloud API specifications.
-- Milestone 13-D Stage 2-B.1 pure consensus reducer independently audited and accepted."*
+- Milestone 13-D Stage 2-B.1 pure consensus reducer and Stage 2-B.2 persistence/compaction merged on main, with Stage 2-B.3 adding the 3-node real-etcd test harness and AWS S3 adapter."*
 
 ### Slide 8: Market Opportunity & Target Customer Segments (6:50 – 7:45)
 *"Rather than using speculative top-down cybersecurity figures, we ground our market sizing in a transparent bottom-up developer model.
@@ -87,9 +87,10 @@ Web3User is uniquely an open-core, developer-first SDK that embeds directly into
 ### Slide 11: Founder & Milestone-Based Roadmap (9:25 – 10:15)
 *"I am Syed Shahed, solo founder of Syed's Enterprises. I have architected and implemented Web3User from its initial policy evaluator to hardware Cloud KMS signing adapters and consensus state reducers.
 Our upcoming roadmap is strictly milestone-driven:
-- Completed & Verified: Milestones 0 through 13-C.1, FN-SEC-01 (AWS/GCP KMS adapters verified in CI via mock contracts), and 13-D Stage 2-B.1 (In-Memory Consensus Reducer).
-- Q1 2027: Stage 2-B.2 Consensus Persistence, etcd watch backpressure, and historical compaction.
-- Q2 2027: Stage 3-A Distributed Multi-Node Raft Consensus Cluster.
+- Completed & Merged on main: Milestones 0 through 13-C.1, FN-SEC-01 (AWS/GCP KMS adapters verified in CI via mock contracts), 13-D Stage 2-B.1 (In-Memory Consensus Reducer), and 13-D Stage 2-B.2 (Consensus Persistence & Compaction, PR #2, BLK-01 closed).
+- PR #9 (Stage 2-B.3): 3-node real-etcd test harness, loopback fault proxy, and AWS S3 adapter (not a production Raft cluster).
+- Q1 2027: Production hardening across open blockers BLK-02–BLK-07, BLK-09, and BLK-12.
+- Q2 2027: Stage 3-A Production Multi-Node Raft Consensus Cluster (BLK-08).
 - Q3 2027: Independent Commercial Security Audit and v1.0.0 Stable Production Release.
 - Q4 2027: Multi-Chain Expansion and native ERC-4337 / ERC-7579 modules."*
 
@@ -148,7 +149,7 @@ Thank you for your time and consideration. Explore our live interactive playgrou
 > - Cloud KMS adapters for AWS and Google Cloud keep private keys inside remote cloud KMS during signing.
 > - An independently audited in-memory consensus reducer tracks state transitions monotonically.
 > 
-> We back this up with empirical engineering rigor: exactly 806 tests passing across 39 test files in repository regression testing, including multi-process race testing and process-crash recovery."*
+> We back this up with empirical engineering rigor: 806/806 historical baseline tests and 984 passed (6 env-gated live S3 skipped) across 54 files in PR #9, including multi-process race testing and process-crash recovery."*
 
 ---
 

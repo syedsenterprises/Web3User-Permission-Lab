@@ -216,10 +216,10 @@ add_card(slide1, Inches(0.8), c_y, c_w, c_h, "FOUNDER & ENTITY", [
 ], COLOR_LINE, COLOR_CYAN)
 
 add_card(slide1, Inches(4.84), c_y, c_w, c_h, "VERIFIED METRICS", [
-    "• 806 / 806 Passing Tests (39 Files)",
+    "• 806/806 Baseline · 984 Passed / 6 Skipped (PR #9)",
     "• FN-SEC-01 Cloud KMS Adapters Verified",
-    "• Pure Consensus Reducer Audited",
-    "• Multi-Process Concurrency Tested"
+    "• Stage 2-B.2 Merged · 2-B.3 Harness (PR #9)",
+    "• Pre-Production (BLK-02–BLK-12 Open)"
 ], COLOR_LINE, COLOR_GREEN)
 
 add_card(slide1, Inches(8.88), c_y, c_w, c_h, "PUBLIC URLS", [
@@ -256,7 +256,7 @@ sb_p0.font.bold = True
 sb_p0.font.color.rgb = COLOR_RED
 
 sb_p1 = sb_tf.add_paragraph()
-sb_p1.text = "TRM Labs recorded $2.87B stolen across 2025 hacks/exploits, with 76% from private key and infrastructure theft. Across all theft vectors, Chainalysis recorded >$3.4B stolen in 2025, with 158,000 individual wallet compromise incidents affecting >=80,000 unique victims. Security failures stem predominantly from credential and key exposure."
+sb_p1.text = "TRM Labs (2026 Report, 2025 hacks dataset) recorded ~$2.87B stolen across ~150 hacks/exploits, with $2.2B (76%) across 45 infrastructure attacks. Across all theft vectors, Chainalysis recorded >$3.4B stolen in 2025, with 158,000 personal-wallet compromise incidents affecting >=80,000 unique victims."
 sb_p1.font.name = FONT_BODY
 sb_p1.font.size = Pt(9.5)
 sb_p1.font.color.rgb = COLOR_MUTED
@@ -462,10 +462,9 @@ add_card(slide6, Inches(0.8), Inches(4.35), w_g, h_g, "3. Cloud KMS Signers (FN-
 ], COLOR_LINE, COLOR_PURPLE)
 
 add_card(slide6, Inches(6.86), Inches(4.35), w_g, h_g, "4. Consensus Reducer & Durable Witness", [
-    "• Pure State Machine Reducer: Milestone 13-D Stage 2-B.1 deterministic in-memory reducer for consensus log events.",
-    "• Single-Slot Idempotency: Duplicate action proposals are safely deduplicated without state corruption.",
-    "• Atomic Epoch Transitions: Fences expired leaders and enforces monotonic consensus log indexes.",
-    "• Planned Durability: etcd watch backpressure, durable PostgreSQL compaction & Raft cluster (Stages 2-B.2 & 3-A)."
+    "• Stage 2-B.1 & 2-B.2 Merged: Pure reducer (11 actions) & PostgreSQL consensus persistence/compaction on main.",
+    "• Stage 2-B.3 Harness (PR #9): 3-node real-etcd test harness, fault proxy & AWS S3 adapter (no static creds).",
+    "• Planned Production Gates: Stage 3-A production Raft cluster (BLK-08) & revocation sync (BLK-02)."
 ], COLOR_LINE, COLOR_GOLD)
 
 add_footer(slide6, 6)
@@ -475,7 +474,7 @@ add_footer(slide6, 6)
 # ==============================================================================
 slide7 = prs.slides.add_slide(blank_layout)
 set_slide_background(slide7)
-add_header(slide7, "Empirical Validation & Testing", "806 Tests Passed Across 39 Test Files · 0 Failures")
+add_header(slide7, "Empirical Validation & Testing", "806 Historical Baseline · 984 Passed, 6 Skipped (PR #9 · 54 Files)")
 
 # Top Metrics Banner
 stat_banner7 = slide7.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.8), Inches(1.55), Inches(11.733), Inches(1.2))
@@ -488,14 +487,14 @@ sb7_tf = stat_banner7.text_frame
 sb7_tf.margin_left = Inches(0.25)
 sb7_tf.margin_top = Inches(0.16)
 sb7_p0 = sb7_tf.paragraphs[0]
-sb7_p0.text = "100% Test Suite Pass Rate in Repository Regression Testing"
+sb7_p0.text = "984 Passed, 6 Env-Gated S3 Skipped, 0 Failures (54 Files · PR #9)"
 sb7_p0.font.name = FONT_TITLE
 sb7_p0.font.size = Pt(15)
 sb7_p0.font.bold = True
 sb7_p0.font.color.rgb = COLOR_GREEN
 
 sb7_p1 = sb7_tf.add_paragraph()
-sb7_p1.text = "806 automated tests across 39 test files executing in Vitest (accepted in Milestone 13-D Stage 2-B.1.1). Rigorous regression testing demonstrating deterministic error handling across Linux, macOS, and Windows test environments."
+sb7_p1.text = "Builds on the accepted Stage 2-B.1.1 baseline (806/806 across 39 files). The 6 skipped tests are env-gated live AWS S3 integration tests. Passing tests do not constitute an independent security audit or proof of production readiness."
 sb7_p1.font.name = FONT_BODY
 sb7_p1.font.size = Pt(9.5)
 sb7_p1.font.color.rgb = COLOR_TEXT
@@ -685,7 +684,7 @@ add_card(slide11, f_left, f_top, f_width, f_height, "Founder: Syed Shahed", [
     "• Core Architecture: Designed and implemented Web3User's deterministic policy evaluator, transactional SQLite WAL persistence, and cumulative window budgeting.",
     "• Cryptographic Integration: Implemented RFC 8410 DER-to-raw Ed25519 signature normalization and AWS/GCP Cloud KMS adapters (Milestone FN-SEC-01).",
     "• Consensus Reducer: Implemented and audited the Milestone 13-D Stage 2-B.1 pure in-memory state machine reducer governing 11 action types.",
-    "• Empirical Test Rigor: Authored comprehensive test suites achieving 806 passing tests across 39 test files in repository regression testing.",
+    "• Empirical Test Rigor: 806/806 historical baseline (39 files); 984 passed, 6 env-gated S3 skipped (54 files, PR #9).",
     "• Direct Contact: info@syedsenterprises.org"
 ], COLOR_LINE, COLOR_CYAN)
 
@@ -696,20 +695,18 @@ r_width = Inches(6.933)
 r_height = Inches(5.0)
 
 add_card(slide11, r_left, r_top, r_width, r_height, "Milestone-Based Engineering Roadmap", [
-    "✓ COMPLETED — Milestones M0–M13-C.1 (Core Engine & Lifecycle)",
-    "  • ERC-20 policy evaluator, SQLite WAL persistence, single-use replay guard, cumulative budgets.",
-    "✓ COMPLETED — Milestone FN-SEC-01 (Cloud KMS Signers)",
-    "  • AWS KMS and GCP Cloud KMS adapters verified in CI against mock contracts with RFC 8410 DER normalization.",
-    "✓ COMPLETED — Milestone 13-D Stage 2-B.1 (Consensus Reducer)",
-    "  • Pure in-memory consensus reducer governing 11 action types, atomic epochs, and monotonic log indexing.",
-    "⏳ Q1 2027 — Stage 2-B.2 (Consensus Persistence & Compaction)",
-    "  • Implement etcd watch backpressure, durable PostgreSQL historical compaction, and snapshot storage.",
-    "⏳ Q2 2027 — Stage 3-A (Distributed Multi-Node Raft Cluster)",
+    "✓ MERGED — M0–M13-C.1, FN-SEC-01 & Stage 2-B.1 / 2-B.2",
+    "  • Core engine, Cloud KMS mock-verified adapters, consensus reducer & persistence (BLK-01 closed).",
+    "✓ PR #9 — Stage 2-B.3 Harness & AWS S3 Adapter (Not Production)",
+    "  • 3-node real-etcd test harness, loopback fault proxy & S3 adapter (provider-chain auth).",
+    "⏳ Q1 2027 — Production Hardening (BLK-02–07, BLK-09, BLK-12)",
+    "  • Revocation sync, live KMS/S3 validation, air-gapped keys, DR drills, Postgres HA/observability.",
+    "⏳ Q2 2027 — Stage 3-A Production Multi-Node Raft Cluster (BLK-08)",
     "  • Multi-node consensus deployment, partition tolerance, and cluster failover benchmarking.",
-    "⏳ Q3 2027 — Commercial Security Audit & v1.0.0 Release",
+    "⏳ Q3 2027 — Commercial Security Audit (BLK-10) & v1.0.0 Release",
     "  • Independent commercial security audit and production general availability release.",
     "⏳ Q4 2027 — Multi-Chain & Account Abstraction Native Plugins",
-    "  • Native ERC-4337 paymasters and ERC-7579 session key validation modules for EVM & Solana."
+    "  • Native ERC-4337 paymasters and ERC-7579 session key validation modules for EVM."
 ], COLOR_LINE, COLOR_GOLD)
 
 add_footer(slide11, 11)
@@ -765,7 +762,7 @@ c_p0.font.bold = True
 c_p0.font.color.rgb = COLOR_TEXT
 
 c_p1 = cta_tf.add_paragraph()
-c_p1.text = "Proven engineering rigor (806 passed tests across 39 files), Cloud KMS integration, and a live interactive playground deployed today. With .TECH funding support, our proposed allocation will fund a commercial security audit, provision dedicated hardware HSM testbeds, and expand developer tooling."
+c_p1.text = "806/806 baseline (39 files); 984 passed / 6 env-gated S3 skipped (54 files, PR #9). Pre-production (BLK-02–BLK-12 open). With .TECH funding support, our proposed allocation will fund a commercial security audit, provision dedicated hardware HSM testbeds, and expand developer tooling."
 c_p1.font.name = FONT_BODY
 c_p1.font.size = Pt(10)
 c_p1.font.color.rgb = COLOR_MUTED

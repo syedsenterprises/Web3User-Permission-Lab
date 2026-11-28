@@ -8,7 +8,7 @@
 **Documentation:** [https://docs.web3user.tech](https://docs.web3user.tech)  
 **GitHub Repository:** `https://github.com/syedsenterprises/Web3User-Permission-Lab`  
 **Application Category:** Developer Tools, Infrastructure & Blockchain Security  
-**Date of Submission:** 24 November 2026
+**Date of Submission:** 24 November 2026 (Updated 28 November 2026)
 
 ---
 
@@ -27,8 +27,8 @@ Once evaluated, Web3User issues single-use signed authorization envelopes (Ed255
 In traditional Web3 architectures, possession of a private key conveys total, unconstrained authority over all assets in an account. If an automated bot, API credential, or operational worker process is compromised, an attacker can transfer all funds immediately. 
 
 Empirical blockchain security research demonstrates the dominance of key compromise and infrastructure failures:
-- **TRM Labs (2025 Hacks & Exploits Dataset):** In its analysis of 2025 crypto hacks and exploits, TRM Labs reported that approximately **$2.87 billion was stolen**, with **$2.2 billion (approximately 76%) resulting specifically from infrastructure attacks**—including private key theft, seed phrase compromises, API key leaks, and access control breaches—far exceeding smart contract code bugs within hacks.
-- **Chainalysis Crypto Crime Report (2025–2026):** Across all cryptocurrency theft vectors (including centralized breaches, wallet drainers, and phishing), total theft exceeded **$3.4 billion in 2025**. Furthermore, Chainalysis documented over **158,000 individual wallet compromise incidents, affecting at least 80,000 unique victims in 2025**.
+- **TRM Labs (2026 Crypto Crime Report — 2025 Hacks & Exploits Dataset):** In its analysis of 2025 crypto hacks and exploits (`https://www.trmlabs.com/reports-and-whitepapers/2026-crypto-crime-report`), TRM Labs reported that approximately **$2.87 billion was stolen across nearly 150 hacks and exploits**, with **$2.2 billion (76%) across 45 incidents** resulting specifically from infrastructure attacks—including private key theft, seed phrase compromises, API key leaks, and access control breaches—far exceeding smart contract code bugs within hacks.
+- **Chainalysis (2025–2026 Crypto Hacking & Stolen Funds Analysis):** Across all cryptocurrency theft vectors (`https://www.chainalysis.com/blog/crypto-hacking-stolen-funds-2026/`), total theft exceeded **$3.4 billion in 2025**. Separately within personal-wallet compromises, Chainalysis documented **158,000 personal-wallet compromise incidents affecting at least 80,000 unique victims in 2025** (not all $3.4B was stolen via private-key compromise alone).
 
 Furthermore, while on-chain multi-signature smart contracts (such as Safe) provide essential custody governance for cold storage treasuries, requiring an on-chain multisig transaction for every routine automated action incurs gas fees, block latency, and manual quorum coordination. Web3User provides the missing pre-execution authorization layer: deterministic, pre-execution off-chain policy governance with hardware-isolated signing, allowing developers to enforce execution limits before transactions reach signers.
 
@@ -36,7 +36,7 @@ Furthermore, while on-chain multi-signature smart contracts (such as Safe) provi
 
 ## Question 3: What is the current technical implementation status?
 
-Web3User is a functioning, verified TypeScript software library backed by **806 passing tests across 39 test files (100% pass rate, 0 failures)** in repository regression testing (accepted in Milestone 13-D Stage 2-B.1.1). These tests provide empirical evidence of deterministic behavior and error handling across Linux, macOS, and Windows test environments.
+Web3User is a functioning, pre-production (`v0.1.0-rc.1`, `private: true`) TypeScript software library backed by a **historical accepted milestone baseline of 806 passing tests across 39 test files (Stage 2-B.1.1)** and a **latest PR #9 local regression result of 984 passed, 6 skipped, 0 failures across 54 test files** (where the 6 skipped tests are environment-gated live AWS S3 integration tests in `test/witness/aws-s3-adapter.real.test.ts` that require live AWS credentials/buckets). Passing tests demonstrate deterministic local/mocked behavior across Linux and Windows environments; they do **not** constitute an independent security audit or proof of production readiness.
 
 Key completed and verified milestones include:
 1. **Core Policy Engine (Milestones 0–8):** Deterministic ERC-20 transfer calldata parsing (`0xa9059cbb`), parameter normalization, address whitelisting, and per-action limit enforcement.
@@ -44,10 +44,10 @@ Key completed and verified milestones include:
 3. **Cumulative Spending Budgets:** Fixed UTC hourly (3,600s) and daily (86,400s) window budget tracking preventing budget exhaustion or cross-window leakage.
 4. **Monotonic Clock Protection:** Subtraction-first safe integer TTL arithmetic and `ClockGuard` high-water mark anchoring preventing time-travel or system-clock skew attacks.
 5. **Cloud KMS Signer Adapters (Milestone FN-SEC-01):** Production-ready signer adapters for AWS KMS and Google Cloud KMS featuring RFC 8410 DER-to-raw 64-byte Ed25519 signature normalization, algorithm contract enforcement, and automated factory instantiation. In automated CI testing, these adapters are verified against mock service contracts matching cloud API specifications (dedicated live cloud HSM testing is a planned funded milestone).
-6. **Consensus Pure State Machine Reducer (Milestone 13-D Stage 2-B.1):** Deterministic in-memory consensus reducer handling 11 distinct action types, single-slot idempotency, atomic epoch transitions, and strict monotonic log indexing independently audited and accepted (`docs/M13-D-STAGE-2B1-1-INDEPENDENT-AUDIT.md`).
-7. **Client-Side Interactive Web Playground:** Operational in-browser policy demonstration deployed at `https://web3user.tech/#demo` featuring 9 representative scenario presets, live calldata ABI decoding, rule checklist verification, and copyable TypeScript code (runs client-side in WebAssembly/JS).
+6. **Consensus Pure State Machine Reducer & Persistence (Milestone 13-D Stages 2-B.1, 2-B.2 & 2-B.3):** Stage 2-B.1 pure consensus reducer (11 action types, single-slot idempotency, atomic epoch transitions) and Stage 2-B.2 PostgreSQL consensus persistence, snapshot manager, and compaction coordinator are merged on `main` (PR #2, `BLK-01` closed). Stage 2-B.3 (PR #9) adds a 3-node real-`etcd` test harness, TCP loopback fault proxy, and AWS S3 snapshot adapter using the AWS SDK v3 default credential provider chain (test harness and adapter work only—not a production multi-node Raft deployment).
+7. **Client-Side Interactive Web Playground:** Operational in-browser policy demonstration deployed at `https://web3user.tech/#demo` featuring 9 representative scenario presets, live calldata ABI decoding, rule checklist verification, and copyable TypeScript code (runs client-side in JS/browser; no hosted API).
 
-*Boundary Note:* On-chain smart contract verification modules (ERC-4337 / ERC-7579), durable multi-node Raft clusters (Stage 3-A), and live cloud HSM infrastructure are planned roadmap milestones, not operational production services.
+*Boundary Note & Open Production Blockers (`BLK-02`–`BLK-12`):* On-chain smart contract verification modules (ERC-4337 / ERC-7579), production multi-node Raft clusters (Stage 3-A, `BLK-08`), revocation freshness background sync (`BLK-02`), live cloud KMS/S3 validation (`BLK-03`, `BLK-07`), air-gapped key ceremony & DR drills (`BLK-04`, `BLK-05`), Postgres HA/observability (`BLK-06`, `BLK-09`), and an independent commercial security audit (`BLK-10`) remain open production gates, not operational production services.
 
 ---
 
@@ -112,7 +112,7 @@ The requested funding will be directly deployed across four critical technical a
 
 ## Question 7: What are the key future milestones on your roadmap?
 
-1. **Q1 2027 — Stage 2-B.2 Consensus Persistence & Compaction:** Complete implementation of etcd watch backpressure, durable PostgreSQL historical compaction, and snapshot storage.
-2. **Q2 2027 — Stage 3-A Multi-Node Consensus Cluster:** Deployment and stress-testing of distributed multi-node Raft clusters with automated leader election and partition tolerance.
+1. **Q1 2027 — Production Hardening & Open Blockers (`BLK-02`–`BLK-07`, `BLK-09`, `BLK-12`):** Complete revocation freshness background sync, live AWS/GCP KMS & S3 cloud validation, air-gapped backup key ceremony, cross-store DR drills, PostgreSQL HA/SSL/PITR, and observability baseline (building on Stage 2-B.2 merged on `main` and Stage 2-B.3 harness in PR #9).
+2. **Q2 2027 — Stage 3-A Production Multi-Node Raft Consensus Cluster (`BLK-08`):** Production deployment and stress-testing of distributed multi-node Raft clusters with automated leader election and partition tolerance.
 3. **Q3 2027 — Independent Commercial Audit & v1.0.0 Stable Release:** Complete third-party security audit and release the stable production SDK.
 4. **Q4 2027 — Multi-Chain & Account Abstraction Native Modules:** Launch official ERC-4337 paymaster and ERC-7579 session key validation plugins for Ethereum, Arbitrum, Base, and Polygon.
