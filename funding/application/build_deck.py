@@ -216,7 +216,7 @@ add_card(slide1, Inches(0.8), c_y, c_w, c_h, "FOUNDER & ENTITY", [
 ], COLOR_LINE, COLOR_CYAN)
 
 add_card(slide1, Inches(4.84), c_y, c_w, c_h, "VERIFIED METRICS", [
-    "• 806/806 Baseline · 984 Passed / 6 Skipped (PR #9)",
+    "• 806/806 Baseline · 985 Passed / 6 Skipped (PR #9)",
     "• FN-SEC-01 Cloud KMS Adapters Verified",
     "• Stage 2-B.2 Merged · 2-B.3 Harness (PR #9)",
     "• Pre-Production (BLK-02–BLK-12 Open)"
@@ -474,7 +474,7 @@ add_footer(slide6, 6)
 # ==============================================================================
 slide7 = prs.slides.add_slide(blank_layout)
 set_slide_background(slide7)
-add_header(slide7, "Empirical Validation & Testing", "806 Historical Baseline · 984 Passed, 6 Skipped (PR #9 · 54 Files)")
+add_header(slide7, "Empirical Validation & Testing", "806 Historical Baseline · 985 Passed, 6 Skipped (PR #9 · 54 Files)")
 
 # Top Metrics Banner
 stat_banner7 = slide7.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.8), Inches(1.55), Inches(11.733), Inches(1.2))
@@ -487,7 +487,7 @@ sb7_tf = stat_banner7.text_frame
 sb7_tf.margin_left = Inches(0.25)
 sb7_tf.margin_top = Inches(0.16)
 sb7_p0 = sb7_tf.paragraphs[0]
-sb7_p0.text = "984 Passed, 6 Env-Gated S3 Skipped, 0 Failures (54 Files · PR #9)"
+sb7_p0.text = "985 Passed, 6 Env-Gated S3 Skipped, 0 Failures (54 Files · PR #9)"
 sb7_p0.font.name = FONT_TITLE
 sb7_p0.font.size = Pt(15)
 sb7_p0.font.bold = True
@@ -684,7 +684,7 @@ add_card(slide11, f_left, f_top, f_width, f_height, "Founder: Syed Shahed", [
     "• Core Architecture: Designed and implemented Web3User's deterministic policy evaluator, transactional SQLite WAL persistence, and cumulative window budgeting.",
     "• Cryptographic Integration: Implemented RFC 8410 DER-to-raw Ed25519 signature normalization and AWS/GCP Cloud KMS adapters (Milestone FN-SEC-01).",
     "• Consensus Reducer: Implemented and audited the Milestone 13-D Stage 2-B.1 pure in-memory state machine reducer governing 11 action types.",
-    "• Empirical Test Rigor: 806/806 historical baseline (39 files); 984 passed, 6 env-gated S3 skipped (54 files, PR #9).",
+    "• Empirical Test Rigor: 806/806 historical baseline (39 files); 985 passed, 6 env-gated S3 skipped (54 files, PR #9).",
     "• Direct Contact: info@syedsenterprises.org"
 ], COLOR_LINE, COLOR_CYAN)
 
@@ -762,7 +762,7 @@ c_p0.font.bold = True
 c_p0.font.color.rgb = COLOR_TEXT
 
 c_p1 = cta_tf.add_paragraph()
-c_p1.text = "806/806 baseline (39 files); 984 passed / 6 env-gated S3 skipped (54 files, PR #9). Pre-production (BLK-02–BLK-12 open). With .TECH funding support, our proposed allocation will fund a commercial security audit, provision dedicated hardware HSM testbeds, and expand developer tooling."
+c_p1.text = "806/806 baseline (39 files); 985 passed / 6 env-gated S3 skipped (54 files, PR #9). Pre-production (BLK-02–BLK-12 open). With .TECH funding support, our proposed allocation will fund a commercial security audit, provision dedicated hardware HSM testbeds, and expand developer tooling."
 c_p1.font.name = FONT_BODY
 c_p1.font.size = Pt(10)
 c_p1.font.color.rgb = COLOR_MUTED

@@ -49,8 +49,8 @@ Fifth, a signed V3 authorization envelope is returned, verifiable off-chain agai
 - Pure Consensus Reducer: A verified in-memory state machine reducer handles 11 action types, single-slot idempotency, atomic epoch transitions, and monotonic indexing (Milestone 13-D Stage 2-B.1).
 - Durable Witness: PostgreSQL schemas and single-node etcd integration provide historical event tracking."*
 
-### Slide 7: Security & Validation — 806 Historical · 984 Passed / 6 Skipped (PR #9) (5:50 – 6:50)
-*"Security requires rigorous, empirical proof. Building on our historical accepted milestone baseline of 806 passing tests across 39 test files (Stage 2-B.1.1), our latest PR #9 local regression suite achieved 984 passing tests across 54 test files with zero failures and 6 skipped environment-gated live AWS S3 integration tests. Passing tests do not constitute an independent security audit or proof of production readiness.
+### Slide 7: Security & Validation — 806 Historical · 985 Passed / 6 Skipped (PR #9) (5:50 – 6:50)
+*"Security requires rigorous, empirical proof. Building on our historical accepted milestone baseline of 806 passing tests across 39 test files (Stage 2-B.1.1), our latest PR #9 local regression suite achieved 985 passing tests across 54 test files with zero failures and 6 skipped environment-gated live AWS S3 integration tests. Passing tests do not constitute an independent security audit or proof of production readiness.
 This includes:
 - Multi-process OS concurrency tests using deterministic IPC rendezvous barriers, demonstrating that concurrent attempts to consume the same authorization result in exactly one ALLOW and deterministic DENYs.
 - Process-crash recovery tests confirming automatic SQLite WAL rollback upon uncommitted worker termination.
@@ -149,7 +149,7 @@ Thank you for your time and consideration. Explore our live interactive playgrou
 > - Cloud KMS adapters for AWS and Google Cloud keep private keys inside remote cloud KMS during signing.
 > - An independently audited in-memory consensus reducer tracks state transitions monotonically.
 > 
-> We back this up with empirical engineering rigor: 806/806 historical baseline tests and 984 passed (6 env-gated live S3 skipped) across 54 files in PR #9, including multi-process race testing and process-crash recovery."*
+> We back this up with empirical engineering rigor: 806/806 historical baseline tests and 985 passed (6 env-gated live S3 skipped) across 54 files in PR #9, including multi-process race testing and process-crash recovery."*
 
 ---
 

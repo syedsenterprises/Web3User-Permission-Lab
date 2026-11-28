@@ -96,17 +96,17 @@
 
 ---
 
-## Slide 7: Security & Validation — 806 Historical Baseline · 984 Passed / 6 Skipped (PR #9)
+## Slide 7: Security & Validation — 806 Historical Baseline · 985 Passed / 6 Skipped (PR #9)
 - **Slide Headline:** Empirical Regression Evidence & Engineering Audits
 - **Presenter Spoken Remarks:**
-  > "In security infrastructure, claims require rigorous empirical proof. Building on our historical accepted milestone baseline of 806 passing tests across 39 test files (Stage 2-B.1.1), our latest PR #9 local regression suite achieved 984 passing tests across 54 test files with zero failures and 6 skipped environment-gated live AWS S3 integration tests (which require live AWS credentials/buckets). Passing tests do not constitute an independent security audit or proof of production readiness.
+  > "In security infrastructure, claims require rigorous empirical proof. Building on our historical accepted milestone baseline of 806 passing tests across 39 test files (Stage 2-B.1.1), our latest PR #9 local regression suite achieved 985 passing tests across 54 test files with zero failures and 6 skipped environment-gated live AWS S3 integration tests (which require live AWS credentials/buckets). Passing tests do not constitute an independent security audit or proof of production readiness.
   > 
   > Key validation achievements:
   > - Multi-process OS concurrency tests using deterministic IPC rendezvous barriers demonstrate that under concurrent competition for the same authorization, exactly one process receives ALLOW while concurrent attempts receive deterministic DENYs.
   > - Process-crash recovery tests verify automatic SQLite WAL rollback upon uncommitted worker termination.
   > - Milestone FN-SEC-01 Steps 1 through 4 were independently audited and accepted, verifying AWS and GCP Cloud KMS signer adapters against mock service contracts matching cloud API specifications.
   > - Milestone 13-D Stage 2-B.1 pure consensus reducer and Stage 2-B.2 persistence/compaction are merged on main, and Stage 2-B.3 adds the 3-node real-etcd test harness and AWS S3 adapter (harness/adapter only, not a production Raft deployment)."
-- **Proof Metrics:** Historical: 806/806 (39 files) &middot; Latest PR #9: 984 passed, 6 env-gated live S3 skipped, 0 failures (54 files) &middot; FN-SEC-01 accepted.
+- **Proof Metrics:** Historical: 806/806 (39 files) &middot; Latest PR #9: 985 passed, 6 env-gated live S3 skipped, 0 failures (54 files) &middot; FN-SEC-01 accepted.
 
 ---
 
@@ -185,4 +185,4 @@
   > - 20% for Developer Documentation, Quickstarts, and plug-and-play adapters for viem, ethers.js, and wagmi.
   > - 15% for Open-Source Developer Grants and hackathon bounties.
   > 
-  > Web3User has proven its engineering rigor with 806/806 historical baseline tests and 984 passed (6 env-gated live S3 skipped) across 54 files in PR #9, while remaining transparent about open production gates (BLK-02–BLK-12). With your support, we can bring enterprise authorization governance to every Web3 application. Thank you. Visit web3user.tech or contact me at info@syedsenterprises.org."
+  > Web3User has proven its engineering rigor with 806/806 historical baseline tests and 985 passed (6 env-gated live S3 skipped) across 54 files in PR #9, while remaining transparent about open production gates (BLK-02–BLK-12). With your support, we can bring enterprise authorization governance to every Web3 application. Thank you. Visit web3user.tech or contact me at info@syedsenterprises.org."

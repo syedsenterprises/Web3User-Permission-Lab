@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development, 984 passing tests across 54 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
+<meta name="description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development on main, 985 passing tests across 54 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
 <meta name="theme-color" content="#101a2c">
 <title>Web3User Permission Lab &mdash; Enterprise Off-Chain Permission &amp; Authorization Governance</title>
 <link rel="canonical" href="https://web3user.tech/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Web3User">
 <meta property="og:title" content="Web3User Permission Lab &mdash; Enterprise Off-Chain Permission Governance">
-<meta property="og:description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development, 984 passing tests across 54 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
+<meta property="og:description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development on main, 985 passing tests across 54 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
 <meta property="og:url" content="https://web3user.tech/">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Web3User Permission Lab &mdash; Enterprise Off-Chain Permission Governance">
-<meta name="twitter:description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development, 984 passing tests across 54 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
+<meta name="twitter:description" content="Web3User Permission Lab engineering status, roadmap, and architecture: M13-D development on main, 985 passing tests across 54 suites, Cloud KMS/HSM signing adapters, and verifiable transaction governance.">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -103,28 +103,28 @@ footer a{white-space:nowrap}
   <div class="checkpoint-box">
     <div class="checkpoint-header">
       <div class="checkpoint-title">Current Engineering Snapshot &mdash; Milestone 13-D &amp; FN-SEC-01</div>
-      <span class="checkpoint-tag">Development branch &middot; 984 active tests passing</span>
+      <span class="checkpoint-tag">main branch &middot; 985 active tests passing</span>
     </div>
     <div class="checkpoint-grid">
       <div class="stat-item">
-        <div class="stat-label">Active Development Branch</div>
-        <div class="stat-code">feature/m13-d-stage-2b3-multinode</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Synchronized with origin · main at a37518c</div>
+        <div class="stat-label">Verified Main Branch</div>
+        <div class="stat-code">main (PR #9 merged · 22f02e5)</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">CI &amp; CodeQL passing · Static preview on Worker super-tree-7537</div>
       </div>
       <div class="stat-item">
         <div class="stat-label">Regression Verification</div>
-        <div class="stat-val" style="color:var(--green);">984 passed · 54 test files</div>
+        <div class="stat-val" style="color:var(--green);">985 passed · 54 test files</div>
         <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">0 failures · 6 env-gated live S3 tests skipped</div>
       </div>
       <div class="stat-item">
         <div class="stat-label">Hardware-Backed Signing</div>
         <div class="stat-val" style="color:var(--cyan);">FN-SEC-01 Accepted &amp; Verified</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">AWS KMS &amp; GCP Cloud KMS adapters · RFC 8410 DER normalization</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">AWS KMS &amp; GCP Cloud KMS adapters (mock-verified in CI)</div>
       </div>
       <div class="stat-item">
         <div class="stat-label">Consensus Foundation</div>
-        <div class="stat-val" style="color:var(--blue);">Stage 2-B.2 &amp; 2-B.3 Harness</div>
-        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Consensus persistence · snapshots · compaction · 3-node etcd harness</div>
+        <div class="stat-val" style="color:var(--blue);">Stage 2-B.2 &amp; 2-B.3 Merged</div>
+        <div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">Persistence · compaction · S3 adapter · 3-node etcd test harness</div>
       </div>
     </div>
   </div>
@@ -169,8 +169,9 @@ footer a{white-space:nowrap}
       &bull; SQLite WAL persistence, single-use replay protection, policy/key governance, cumulative budgets.<br>
       &bull; Monotonic clock and witness lifecycle, fail-closed recovery, bounded reconciliation pipeline.<br>
       &bull; FN-SEC-01 Cloud KMS signers: AWS KMS and GCP Cloud KMS adapters, DER conversion, mock contract tests.<br>
-      &bull; M13-D Stage 2-B.1 &amp; 2-B.2: Consensus reducer, PostgreSQL persistence, snapshots, compaction &amp; AWS S3 adapter.<br>
-      &bull; Comprehensive regression suite: 984 passed across 54 test files (6 env-gated live S3 tests skipped, 0 failures).</p>
+      &bull; M13-D Stage 2-B.1 &amp; 2-B.2: Consensus reducer, PostgreSQL persistence, snapshots &amp; compaction.<br>
+      &bull; M13-D Stage 2-B.3: 3-node real-etcd test harness, fault proxy &amp; AWS S3 adapter (harness only, not production Raft).<br>
+      &bull; Comprehensive regression suite: 985 passed across 54 test files (6 env-gated live S3 tests skipped, 0 failures).</p>
     </article>
     <article class="card">
       <h3>Open Production Gates</h3>
@@ -212,9 +213,9 @@ footer a{white-space:nowrap}
       <span class="status">Accepted</span>
     </div>
     <div class="milestone">
-      <div class="id">M13-D 2-B.2</div>
-      <div><strong>Historical Retention, Snapshots &amp; Compaction</strong><p>PostgreSQL consensus persistence, snapshot manager, compaction coordinator, AWS S3 adapter, and Stage 2-B.3 multi-node etcd test harness.</p></div>
-      <span class="status">Committed</span>
+      <div class="id">M13-D 2-B.2 &amp; 2-B.3</div>
+      <div><strong>Persistence, Compaction, S3 Adapter &amp; etcd Test Harness</strong><p>Stage 2-B.2 persistence/compaction (PR #2) and Stage 2-B.3 3-node etcd test harness, fault proxy, and AWS S3 adapter (PR #9) merged on main.</p></div>
+      <span class="status">Merged</span>
     </div>
     <div class="milestone">
       <div class="id">Stage 3-A</div>
@@ -249,7 +250,7 @@ footer a{white-space:nowrap}
       <p>Air-gapped backup-key custody, cross-store recovery and measured RPO/RTO drills are not complete.</p>
     </article>
   </div>
-  <p class="muted">The PostgreSQL-backed witness path remains the live authority and single point of failure — not etcd. No independent commercial security audit has been completed.</p>
+  <p class="muted">Blockers BLK-02 through BLK-12 remain open (BLK-01 closed). The PostgreSQL-backed witness path remains the live authority and single point of failure &mdash; not etcd. No independent commercial security audit has been completed, and both web3user.tech and docs.web3user.tech serve this identical static preview via Worker super-tree-7537.</p>
 </section>
 
 <section class="demo-section" id="demo">
