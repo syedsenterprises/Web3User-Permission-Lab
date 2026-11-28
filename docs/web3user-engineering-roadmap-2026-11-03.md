@@ -1,8 +1,8 @@
 # Web3User Permission Lab — Engineering Status & Roadmap
 
-**Snapshot date:** 23 November 2026 (Updated from 3 November 2026 baseline)  
-**Development branch:** `feature/m13-d-consensus`  
-**Development HEAD:** `ef219646ce8dbcfb3f6e9120fb2c365a4119f119`  
+**Snapshot date:** 28 November 2026 (Updated from 23 November 2026 baseline)  
+**Development branch:** `feature/m13-d-stage-2b3-multinode`  
+**`main` HEAD:** `a37518c05050acd08074948147d591b6ca0c7cb3` (`b0c6bf5` merged PR #2 Stage 2-B.2; `cc452fa`..`a37518c` Hallmark website polish)  
 **Public release tag:** `v0.1.0-rc.1` (historical; not the current development branch head)  
 
 ## Current state
@@ -109,3 +109,30 @@ The project has progressed beyond the M6-era status currently published on the w
 2. Plan Stage 2-B / Stage 3 multi-node Raft cluster validation (when authorized).
 
 **Scope warning:** The Cloudflare site is a static project-information preview. It does not mean the authorization engine, PostgreSQL witness service, or consensus path is deployed as a hosted production backend.
+
+---
+
+## Verified Synchronization & Blocker Ledger (28 November 2026)
+
+- **Active Branch:** `feature/m13-d-stage-2b3-multinode` (synchronized with `origin/feature/m13-d-stage-2b3-multinode` and merged with `origin/main` at `a37518c`).
+- **Latest Verified Full Suite (`npx vitest run` on `feature/m13-d-stage-2b3-multinode`):** **54 test files passed; 984 tests passed; 6 skipped** (env-gated live AWS S3 tests in `test/witness/aws-s3-adapter.real.test.ts`); **0 failures**; `npx tsc --noEmit`, `npm run build`, and `node scripts/validate-dependency-pins.mjs` exited 0.
+- **GitHub Actions (`main`):** `CI` (`46075135593`) and `CodeQL Advanced` (`46075135555`) both `completed / success` on `a37518c`. Workflows trigger on `main` pushes/PRs.
+- **Cloudflare Deployment:** Worker `super-tree-7537` deployed (`be61dd25-32a9-4980-bfdd-7fc8b08e5130`) serving `https://web3user.tech` and `https://docs.web3user.tech`.
+- **Stage 2-B.2 & 2-B.3 Status:** Stage 2-B.2 merged on `main` (PR #2, `b0c6bf5`); Stage 2-B.3 multi-node etcd cluster harness (`test/witness/helpers/real-etcd-cluster.ts`, `loopback-fault-proxy.ts`, `raft-compaction-reconciliation.real.test.ts`) and AWS S3 adapter (`src/witness/aws-s3-adapter.ts`) committed on `feature/m13-d-stage-2b3-multinode`.
+
+### 12 Production Blockers (`BLK-01`..`BLK-12`)
+
+| ID | Blocker | Status |
+|---|---|---|
+| `BLK-01` | Uncommitted Stage 2-B.2 / diverged `main` | **Closed** (PR #2 merged on `main` at `b0c6bf5`) |
+| `BLK-02` | Revocation 30s freshness, no background sync | **Open** |
+| `BLK-03` | Live AWS/GCP KMS validation | **Open** |
+| `BLK-04` | Air-gapped backup key ceremony, Safes A/B | **Open** |
+| `BLK-05` | Cross-store DR drills, measured RPO/RTO | **Open** |
+| `BLK-06` | Postgres HA, SSL/TLS, least-privilege roles, PITR | **Open** |
+| `BLK-07` | Live S3/GCS snapshot backend validation | **Open** |
+| `BLK-08` | Multi-node etcd Raft production cluster (Stage 3) | **Open** |
+| `BLK-09` | Observability (Prometheus/OTel), 24h compaction baseline | **Open** |
+| `BLK-10` | Independent external security audit | **Open** |
+| `BLK-11` | Public SDK / hosted API | **Open** |
+| `BLK-12` | Six low advisories (Stage 2-B.2 `F-STEP5-01..04`, `F-STEP6-01..02`) | **Open** |
